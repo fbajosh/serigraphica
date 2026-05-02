@@ -1,1 +1,16 @@
 raw_input/
+node_modules/
+dist/
+out/
+.vite/
+.DS_Store
+*.log
+
+# Python
+python/.venv/
+__pycache__/
+*.pyc
+
+# Output sidecar artifacts
+*.corrected.jpg
+*.serigraphica.json
