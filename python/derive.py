@@ -58,11 +58,38 @@ def _rasterize_strokes(width: int, height: int, strokes: list[dict]) -> np.ndarr
     return mask
 
 
+def _stroke_points(strokes: list[dict]) -> np.ndarray | None:
+    pts: list[tuple[float, float]] = []
+    for stroke in strokes:
+        for p in stroke.get("points") or []:
+            if len(p) >= 2:
+                pts.append((float(p[0]), float(p[1])))
+    if len(pts) < 4:
+        return None
+    return np.array(pts, dtype=np.float32).reshape(-1, 1, 2)
+
+
 def _quad_from_mask(mask: np.ndarray) -> np.ndarray | None:
     ys, xs = np.where(mask > 0)
     if xs.size < 4:
         return None
     pts = np.column_stack([xs, ys]).astype(np.int32).reshape(-1, 1, 2)
+    hull = cv2.convexHull(pts)
+    if hull is None or len(hull) < 4:
+        return None
+    peri = cv2.arcLength(hull, True)
+    for eps in EPSILON_SWEEP:
+        approx = cv2.approxPolyDP(hull, eps * peri, True)
+        if len(approx) == 4 and cv2.isContourConvex(approx):
+            return _order_corners(approx)
+    box = cv2.boxPoints(cv2.minAreaRect(hull))
+    return _order_corners(box)
+
+
+def _quad_from_strokes(strokes: list[dict]) -> np.ndarray | None:
+    pts = _stroke_points(strokes)
+    if pts is None:
+        return None
     hull = cv2.convexHull(pts)
     if hull is None or len(hull) < 4:
         return None
@@ -161,10 +188,14 @@ def derive_from_strokes(
     full_inner_mask = None
     if outer_strokes:
         full_outer_mask = _rasterize_strokes(image_width, image_height, outer_strokes)
-        outer_quad = _quad_from_mask(full_outer_mask)
+        outer_quad = _quad_from_strokes(outer_strokes)
+        if outer_quad is None:
+            outer_quad = _quad_from_mask(full_outer_mask)
     if inner_strokes:
         full_inner_mask = _rasterize_strokes(image_width, image_height, inner_strokes)
-        inner_quad = _quad_from_mask(full_inner_mask)
+        inner_quad = _quad_from_strokes(inner_strokes)
+        if inner_quad is None:
+            inner_quad = _quad_from_mask(full_inner_mask)
 
     if outer_quad is None and inner_quad is None:
         return out
@@ -205,10 +236,8 @@ def derive_from_strokes(
     work_h, work_w = work_lab.shape[:2]
 
     def _work_mask(full_mask: np.ndarray) -> np.ndarray:
-        m = cv2.resize(full_mask, (work_w, work_h), interpolation=cv2.INTER_NEAREST)
-        # Tolerate the hull's corner-corner line drifting just outside the
-        # painted region by a few px (anti-aliasing, downsampling).
-        return cv2.dilate(m, np.ones((3, 3), np.uint8), iterations=1)
+        m = cv2.resize(full_mask, (work_w, work_h), interpolation=cv2.INTER_AREA)
+        return np.where(m > 0, 255, 0).astype(np.uint8)
 
     # Polarity in distance-from-canvas space:
     #   outer rect: distance high outside paper → grad·outward > 0 → grad·inward < 0 → sign = -1
@@ -221,13 +250,13 @@ def derive_from_strokes(
         mask = _work_mask(full_outer_mask)
         band = _max_radius(outer_strokes) * 3.0
         out["outer"] = refine_quad_from_gradients(
-            gx, gy, mask, scale, outer_quad.tolist(), band, sign=-1.0
+            gx, gy, mask, scale, outer_quad.tolist(), band, sign=-1.0, role="outer", edge_field=field
         )
     if inner_quad is not None and full_inner_mask is not None:
         mask = _work_mask(full_inner_mask)
         band = _max_radius(inner_strokes) * 3.0
         out["inner"] = refine_quad_from_gradients(
-            gx, gy, mask, scale, inner_quad.tolist(), band, sign=+1.0
+            gx, gy, mask, scale, inner_quad.tolist(), band, sign=+1.0, role="inner", edge_field=field
         )
 
     if canvas_color is not None:

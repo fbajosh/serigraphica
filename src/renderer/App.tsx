@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type DragEvent } from 'react'
 import { Canvas, CanvasHandle } from './components/Canvas'
-import type { Point, Quad, Tool, Role, Stroke, RectShape, Polyline } from '../shared/types'
+import type { Point, Quad, Tool, Role, Stroke, RectShape, Polyline, SideFitDiagnostic } from '../shared/types'
 
 type Loaded = {
   path: string
@@ -12,6 +12,79 @@ type Loaded = {
 type StrokesState = { outer: Stroke[]; inner: Stroke[] }
 
 const DEFAULT_BRUSH_FRAC = 0.012  // 1.2% of max dim → ~70px on a 6000px image
+const DEBUG_OUTLINES_KEY = 'serigraphica.debugOutlines.v1'
+const SIDE_LABELS = ['Top', 'Right', 'Bottom', 'Left'] as const
+
+type SavedDebugOutline = {
+  version: 1
+  filename: string
+  savedAt: string
+  imageWidth: number
+  imageHeight: number
+  brushRadius: number
+  strokes: StrokesState
+  outerShape: RectShape | null
+  innerShape: RectShape | null
+}
+
+type SavedDebugOutlineMeta = {
+  savedAt: string
+  imageWidth: number
+  imageHeight: number
+  outerStrokes: number
+  innerStrokes: number
+  hasOuterShape: boolean
+  hasInnerShape: boolean
+}
+
+function imageFilename(path: string): string {
+  return path.split(/[\\/]/).pop() || path
+}
+
+function readDebugOutlineStore(): Record<string, SavedDebugOutline> {
+  try {
+    const raw = window.localStorage.getItem(DEBUG_OUTLINES_KEY)
+    return raw ? JSON.parse(raw) : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeDebugOutlineStore(store: Record<string, SavedDebugOutline>) {
+  window.localStorage.setItem(DEBUG_OUTLINES_KEY, JSON.stringify(store))
+}
+
+function getSavedDebugOutline(filename: string): SavedDebugOutline | null {
+  return readDebugOutlineStore()[filename] ?? null
+}
+
+function getSavedDebugOutlineMeta(filename: string): SavedDebugOutlineMeta | null {
+  const saved = getSavedDebugOutline(filename)
+  if (!saved) return null
+  return {
+    savedAt: saved.savedAt,
+    imageWidth: saved.imageWidth,
+    imageHeight: saved.imageHeight,
+    outerStrokes: saved.strokes.outer.length,
+    innerStrokes: saved.strokes.inner.length,
+    hasOuterShape: Boolean(saved.outerShape),
+    hasInnerShape: Boolean(saved.innerShape)
+  }
+}
+
+function fitLabel(diag: SideFitDiagnostic): string {
+  if (diag.state === 'fallback') return 'fallback'
+  if (diag.edgeCoverage < 0.5) return 'weak'
+  return 'fit'
+}
+
+function formatPercent(value: number): string {
+  return `${Math.round(value * 100)}%`
+}
+
+function formatPx(value: number): string {
+  return `${value.toFixed(1)}px`
+}
 
 // When a corner is dragged, the two side polylines that touch it should
 // stretch so their endpoints follow without warping the captured curvature
@@ -68,7 +141,29 @@ export function App() {
   const [innerShape, setInnerShape] = useState<RectShape | null>(null)
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState('Open an image to begin')
+  const [hidePaint, setHidePaint] = useState(false)
+  const [dragActive, setDragActive] = useState(false)
+  const [debugOpen, setDebugOpen] = useState(false)
+  const [debugMessage, setDebugMessage] = useState('')
+  const [savedDebugOutline, setSavedDebugOutline] = useState<SavedDebugOutlineMeta | null>(null)
   const canvasRef = useRef<CanvasHandle>(null)
+  const filename = image ? imageFilename(image.path) : ''
+
+  const refreshSavedDebugOutline = useCallback((targetFilename: string) => {
+    setSavedDebugOutline(getSavedDebugOutlineMeta(targetFilename))
+  }, [])
+
+  const applyLoadedImage = useCallback((res: Loaded) => {
+    setImage(res)
+    setStrokes({ outer: [], inner: [] })
+    setOuterShape(null)
+    setInnerShape(null)
+    setBrushRadius(Math.max(20, Math.round(Math.max(res.width, res.height) * DEFAULT_BRUSH_FRAC)))
+    setTool('paint-outer')
+    setDebugMessage('')
+    refreshSavedDebugOutline(imageFilename(res.path))
+    setStatus('Paint along the outer paper edges, then "Derive rectangles"')
+  }, [refreshSavedDebugOutline])
 
   const handleOpen = useCallback(async () => {
     setBusy(true)
@@ -79,19 +174,41 @@ export function App() {
         setStatus('Ready')
         return
       }
-      setImage(res)
-      setStrokes({ outer: [], inner: [] })
-      setOuterShape(null)
-      setInnerShape(null)
-      setBrushRadius(Math.max(20, Math.round(Math.max(res.width, res.height) * DEFAULT_BRUSH_FRAC)))
-      setTool('paint-outer')
-      setStatus('Paint along the outer paper edges, then "Derive rectangles"')
+      applyLoadedImage(res)
     } catch (err) {
       setStatus(`Error: ${(err as Error).message}`)
     } finally {
       setBusy(false)
     }
-  }, [])
+  }, [applyLoadedImage])
+
+  const handleCanvasDrop = useCallback(async (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    setDragActive(false)
+    const file = e.dataTransfer.files[0]
+    if (!file) return
+    let imagePath = ''
+    try {
+      imagePath = window.serigraphica.filePathForDrop(file)
+    } catch (err) {
+      setStatus(`Error: ${(err as Error).message}`)
+      return
+    }
+    if (!imagePath) {
+      setStatus('Could not read dropped file path')
+      return
+    }
+    setBusy(true)
+    setStatus('Opening dropped image…')
+    try {
+      const res = await window.serigraphica.openImagePath(imagePath)
+      applyLoadedImage(res)
+    } catch (err) {
+      setStatus(`Error: ${(err as Error).message}`)
+    } finally {
+      setBusy(false)
+    }
+  }, [applyLoadedImage])
 
   const handleAddStroke = useCallback((role: Role, stroke: Stroke) => {
     setStrokes((prev) => ({ ...prev, [role]: [...prev[role], stroke] }))
@@ -107,6 +224,12 @@ export function App() {
     setStrokes({ outer: [], inner: [] })
     setOuterShape(null)
     setInnerShape(null)
+  }, [])
+
+  const handleClearRectangles = useCallback(() => {
+    setOuterShape(null)
+    setInnerShape(null)
+    setStatus('Cleared derived rectangles')
   }, [])
 
   const handleUndoStroke = useCallback(() => {
@@ -126,6 +249,8 @@ export function App() {
     }
     setBusy(true)
     setStatus('Deriving rectangles…')
+    setOuterShape(null)
+    setInnerShape(null)
     try {
       const res = await window.serigraphica.deriveFromStrokes(
         image.path,
@@ -146,6 +271,22 @@ export function App() {
       setBusy(false)
     }
   }, [image, strokes])
+
+  const handleRestartFitEngine = useCallback(async () => {
+    setBusy(true)
+    setStatus('Restarting fit engine…')
+    try {
+      await window.serigraphica.restartFitEngine()
+      setDebugMessage('Fit engine restarted')
+      setStatus('Fit engine restarted')
+    } catch (err) {
+      const message = `Restart failed: ${(err as Error).message}`
+      setDebugMessage(message)
+      setStatus(message)
+    } finally {
+      setBusy(false)
+    }
+  }, [])
 
   const handleAutoDetect = useCallback(async () => {
     if (!image) return
@@ -193,6 +334,81 @@ export function App() {
     }
   }, [image, outerShape])
 
+  const handleSaveDebugOutlines = useCallback(() => {
+    if (!image) return
+    const targetFilename = imageFilename(image.path)
+    try {
+      const store = readDebugOutlineStore()
+      store[targetFilename] = {
+        version: 1,
+        filename: targetFilename,
+        savedAt: new Date().toISOString(),
+        imageWidth: image.width,
+        imageHeight: image.height,
+        brushRadius,
+        strokes,
+        outerShape,
+        innerShape
+      }
+      writeDebugOutlineStore(store)
+      refreshSavedDebugOutline(targetFilename)
+      setDebugMessage(`Saved outlines for ${targetFilename}`)
+      setStatus(`Saved debug outlines for ${targetFilename}`)
+    } catch (err) {
+      const message = `Save failed: ${(err as Error).message}`
+      setDebugMessage(message)
+      setStatus(message)
+    }
+  }, [brushRadius, image, innerShape, outerShape, refreshSavedDebugOutline, strokes])
+
+  const handleLoadDebugOutlines = useCallback(() => {
+    if (!image) return
+    const targetFilename = imageFilename(image.path)
+    const saved = getSavedDebugOutline(targetFilename)
+    if (!saved) {
+      setDebugMessage(`No saved outlines for ${targetFilename}`)
+      return
+    }
+    setStrokes(saved.strokes)
+    setOuterShape(saved.outerShape)
+    setInnerShape(saved.innerShape)
+    setBrushRadius(saved.brushRadius)
+    setTool('paint-outer')
+    refreshSavedDebugOutline(targetFilename)
+    const sizeWarning = saved.imageWidth !== image.width || saved.imageHeight !== image.height
+      ? ' Dimensions differ from the open image.'
+      : ''
+    const message = `Loaded outlines for ${targetFilename}.${sizeWarning}`
+    setDebugMessage(message)
+    setStatus(message)
+  }, [image, refreshSavedDebugOutline])
+
+  const handleDeleteDebugOutlines = useCallback(() => {
+    if (!image) return
+    const targetFilename = imageFilename(image.path)
+    try {
+      const store = readDebugOutlineStore()
+      delete store[targetFilename]
+      writeDebugOutlineStore(store)
+      refreshSavedDebugOutline(targetFilename)
+      setDebugMessage(`Deleted saved outlines for ${targetFilename}`)
+      setStatus(`Deleted debug outlines for ${targetFilename}`)
+    } catch (err) {
+      const message = `Delete failed: ${(err as Error).message}`
+      setDebugMessage(message)
+      setStatus(message)
+    }
+  }, [image, refreshSavedDebugOutline])
+
+  useEffect(() => {
+    if (!image) {
+      setSavedDebugOutline(null)
+      setDebugMessage('')
+      return
+    }
+    refreshSavedDebugOutline(imageFilename(image.path))
+  }, [image, refreshSavedDebugOutline])
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!image) return
@@ -238,14 +454,37 @@ export function App() {
         <button onClick={handleDerive} disabled={busy || !image || totalStrokes === 0}>Derive rectangles</button>
         <button onClick={handleAutoDetect} disabled={busy || !image} title="Auto-detect (no painting)">Auto-detect</button>
         <span className="sep" />
+        <ToolButton active={hidePaint} onClick={() => setHidePaint((hidden) => !hidden)} title="Hide paint and dim projected edges">
+          Hide
+        </ToolButton>
+        <span className="sep" />
         <button onClick={() => canvasRef.current?.fitToView()} disabled={!image}>Fit</button>
         <button onClick={() => canvasRef.current?.zoomToActualSize()} disabled={!image}>100%</button>
         <span style={{ flex: 1 }} />
         <button onClick={handleExport} disabled={busy || !image || !outerShape}>Export</button>
-        {image && <span className="filename">{image.path.split('/').pop()}</span>}
+        {image && <span className="filename">{filename}</span>}
       </div>
 
-      <div className="canvas-host">
+      <div
+        className={`canvas-host${dragActive ? ' is-dragging' : ''}${!image ? ' is-empty' : ''}`}
+        onClick={!image ? handleOpen : undefined}
+        onDragEnter={(e) => {
+          e.preventDefault()
+          setDragActive(true)
+        }}
+        onDragOver={(e) => {
+          e.preventDefault()
+          e.dataTransfer.dropEffect = 'copy'
+          setDragActive(true)
+        }}
+        onDragLeave={(e) => {
+          e.preventDefault()
+          const nextTarget = e.relatedTarget
+          if (nextTarget instanceof Node && e.currentTarget.contains(nextTarget)) return
+          setDragActive(false)
+        }}
+        onDrop={handleCanvasDrop}
+      >
         {image ? (
           <Canvas
             ref={canvasRef}
@@ -257,6 +496,7 @@ export function App() {
             strokes={strokes}
             outerShape={outerShape}
             innerShape={innerShape}
+            hidePaint={hidePaint}
             onAddStroke={handleAddStroke}
             onCornerChange={handleCornerChange}
           />
@@ -324,7 +564,19 @@ export function App() {
             Boundary curves snap to the strongest local gradient inside the brush band.
             Export uses the outer rectangle as the crop reference.
           </div>
+          <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+            <button onClick={handleClearRectangles} disabled={!outerShape && !innerShape}>
+              Clear rectangles
+            </button>
+          </div>
         </section>
+        {(outerShape?.diagnostics || innerShape?.diagnostics) && (
+          <section>
+            <h3>Fit diagnostics</h3>
+            <FitDiagnostics label="Outer" shape={outerShape} color="#ff5e5e" />
+            <FitDiagnostics label="Inner" shape={innerShape} color="#4ea1ff" />
+          </section>
+        )}
         <section>
           <h3>Help</h3>
           <div style={{ color: '#888', lineHeight: 1.5 }}>
@@ -336,6 +588,62 @@ export function App() {
       </div>
 
       <div className="statusbar">{status}</div>
+      <div className="debug-outlines">
+        {debugOpen && (
+          <div className="debug-modal" role="dialog" aria-label="Debug outlines">
+            <div className="debug-modal-header">
+              <strong>Debug outlines</strong>
+              <button onClick={() => setDebugOpen(false)} aria-label="Close debug outlines">×</button>
+            </div>
+            <div className="debug-modal-body">
+              <div className="debug-row">
+                <span>Filename</span>
+                <b>{filename || 'No image'}</b>
+              </div>
+              <div className="debug-row">
+                <span>Current</span>
+                <b>{strokes.outer.length} outer / {strokes.inner.length} inner</b>
+              </div>
+              <div className="debug-row">
+                <span>Saved</span>
+                <b>
+                  {savedDebugOutline
+                    ? `${savedDebugOutline.outerStrokes} outer / ${savedDebugOutline.innerStrokes} inner`
+                    : 'None'}
+                </b>
+              </div>
+              {savedDebugOutline && (
+                <>
+                  <div className="debug-row">
+                    <span>Shapes</span>
+                    <b>{savedDebugOutline.hasOuterShape ? 'outer' : '—'} / {savedDebugOutline.hasInnerShape ? 'inner' : '—'}</b>
+                  </div>
+                  <div className="debug-row">
+                    <span>Saved at</span>
+                    <b>{new Date(savedDebugOutline.savedAt).toLocaleString()}</b>
+                  </div>
+                  <div className="debug-row">
+                    <span>Size</span>
+                    <b>{savedDebugOutline.imageWidth}×{savedDebugOutline.imageHeight}</b>
+                  </div>
+                </>
+              )}
+              {debugMessage && <div className="debug-message">{debugMessage}</div>}
+              <div className="debug-actions">
+                <button onClick={handleSaveDebugOutlines} disabled={!image || totalStrokes === 0}>Save</button>
+                <button onClick={handleLoadDebugOutlines} disabled={!image || !savedDebugOutline}>Load</button>
+                <button onClick={handleDeleteDebugOutlines} disabled={!image || !savedDebugOutline}>Delete</button>
+              </div>
+              <div className="debug-actions">
+                <button onClick={handleRestartFitEngine} disabled={busy}>Restart engine</button>
+              </div>
+            </div>
+          </div>
+        )}
+        <button className="debug-fab" onClick={() => setDebugOpen((open) => !open)}>
+          Debug
+        </button>
+      </div>
     </div>
   )
 }
@@ -365,5 +673,38 @@ function ToolButton({
     >
       {children}
     </button>
+  )
+}
+
+function FitDiagnostics({
+  label,
+  shape,
+  color
+}: {
+  label: string
+  shape: RectShape | null
+  color: string
+}) {
+  if (!shape?.diagnostics) return null
+  return (
+    <div className="fit-diagnostics" style={{ '--fit-color': color } as CSSProperties & Record<'--fit-color', string>}>
+      <div className="fit-diagnostics-title">{label}</div>
+      {shape.diagnostics.sides.map((diag, index) => {
+        const sideLabel = SIDE_LABELS[index] ?? String(index + 1)
+        const stateLabel = fitLabel(diag)
+        const cornerShift = shape.diagnostics?.cornerShifts?.[index] ?? 0
+        return (
+          <div className={`fit-row fit-row-${stateLabel}`} key={sideLabel}>
+            <span>{sideLabel}</span>
+            <b>{stateLabel}</b>
+            <span>{diag.acceptedSamples}/{diag.sampleCount}</span>
+            <span>{formatPercent(diag.edgeCoverage)}</span>
+            <span title={`Corner moved ${formatPx(cornerShift)}; polynomial degree ${diag.polynomialDegree ?? 0}${diag.straightCenterPrior ? '; straight center prior' : ''}`}>
+              {formatPx(diag.meanOffset)}
+            </span>
+          </div>
+        )
+      })}
+    </div>
   )
 }

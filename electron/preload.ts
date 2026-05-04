@@ -1,7 +1,10 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 
 contextBridge.exposeInMainWorld('serigraphica', {
   openImage: () => ipcRenderer.invoke('open-image'),
+  openImagePath: (imagePath: string) => ipcRenderer.invoke('open-image-path', imagePath),
+  filePathForDrop: (file: Parameters<typeof webUtils.getPathForFile>[0]) => webUtils.getPathForFile(file),
+  restartFitEngine: () => ipcRenderer.invoke('restart-fit-engine'),
   detectOuterRect: (imagePath: string) => ipcRenderer.invoke('detect-outer-rect', imagePath),
   deriveFromStrokes: (
     imagePath: string,

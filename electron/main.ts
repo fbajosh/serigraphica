@@ -25,22 +25,23 @@ class Sidecar {
   start() {
     if (this.proc) return
     const python = existsSync(venvPython) ? venvPython : 'python3'
-    this.proc = spawn(python, ['-u', pythonScript], {
+    const proc = spawn(python, ['-u', pythonScript], {
       cwd: projectRoot,
       env: { ...process.env, PYTHONUNBUFFERED: '1' }
     })
-    this.proc.stdout.setEncoding('utf8')
-    this.proc.stdout.on('data', (chunk: string) => this.onStdout(chunk))
-    this.proc.stderr.setEncoding('utf8')
-    this.proc.stderr.on('data', (chunk: string) => {
+    this.proc = proc
+    proc.stdout.setEncoding('utf8')
+    proc.stdout.on('data', (chunk: string) => this.onStdout(chunk))
+    proc.stderr.setEncoding('utf8')
+    proc.stderr.on('data', (chunk: string) => {
       process.stderr.write(`[sidecar] ${chunk}`)
     })
-    this.proc.on('exit', (code, signal) => {
+    proc.on('exit', (code, signal) => {
       console.error(`[sidecar] exited code=${code} signal=${signal}`)
       const err = new Error(`sidecar exited code=${code}`)
       for (const p of this.pending.values()) p.reject(err)
       this.pending.clear()
-      this.proc = null
+      if (this.proc === proc) this.proc = null
     })
   }
 
@@ -86,9 +87,25 @@ class Sidecar {
       this.proc = null
     }
   }
+
+  async restart() {
+    const proc = this.proc
+    if (!proc) {
+      this.start()
+      return
+    }
+    await new Promise<void>((resolve) => {
+      proc.once('exit', () => resolve())
+      proc.kill()
+      setTimeout(resolve, 1000)
+    })
+    if (this.proc === proc) this.proc = null
+    this.start()
+  }
 }
 
 const sidecar = new Sidecar()
+const supportedImageExtensions = new Set(['.jpg', '.jpeg', '.png'])
 
 protocol.registerSchemesAsPrivileged([
   { scheme: 'local-image', privileges: { standard: true, secure: true, supportFetchAPI: true, bypassCSP: true } }
@@ -125,14 +142,12 @@ function registerLocalImageProtocol() {
   })
 }
 
-ipcMain.handle('open-image', async () => {
-  const result = await dialog.showOpenDialog({
-    title: 'Open image',
-    properties: ['openFile'],
-    filters: [{ name: 'Images', extensions: ['jpg', 'jpeg', 'png'] }]
-  })
-  if (result.canceled || result.filePaths.length === 0) return null
-  const path = result.filePaths[0]
+async function loadImage(path: string) {
+  if (!path) throw new Error('missing image path')
+  const ext = extname(path).toLowerCase()
+  if (!supportedImageExtensions.has(ext)) {
+    throw new Error(`unsupported image type: ${ext || 'unknown'}`)
+  }
   const meta = await sidecar.call<{ width: number; height: number }>('image_meta', { path })
   return {
     path,
@@ -140,6 +155,20 @@ ipcMain.handle('open-image', async () => {
     height: meta.height,
     dataUrl: `local-image://localhost${path}`
   }
+}
+
+ipcMain.handle('open-image', async () => {
+  const result = await dialog.showOpenDialog({
+    title: 'Open image',
+    properties: ['openFile'],
+    filters: [{ name: 'Images', extensions: ['jpg', 'jpeg', 'png'] }]
+  })
+  if (result.canceled || result.filePaths.length === 0) return null
+  return loadImage(result.filePaths[0])
+})
+
+ipcMain.handle('open-image-path', async (_evt, imagePath: string) => {
+  return loadImage(imagePath)
 })
 
 ipcMain.handle('detect-outer-rect', async (_evt, imagePath: string) => {
@@ -156,6 +185,9 @@ ipcMain.handle(
     outerStrokes: unknown[],
     innerStrokes: unknown[]
   ) => {
+    if (process.env.ELECTRON_RENDERER_URL) {
+      await sidecar.restart()
+    }
     return sidecar.call('derive_from_strokes', {
       path: imagePath,
       image_width: imageWidth,
@@ -165,6 +197,11 @@ ipcMain.handle(
     })
   }
 )
+
+ipcMain.handle('restart-fit-engine', async () => {
+  await sidecar.restart()
+  return { ok: true }
+})
 
 ipcMain.handle('export-corrected', async (_evt, imagePath: string, corners: number[][], quality: number) => {
   const dir = dirname(imagePath)

@@ -11,6 +11,11 @@ import type { Quad, Point, Tool, Role, Stroke, RectShape, Polyline } from '../..
 
 const HANDLE_RADIUS = 8 // screen px
 const HANDLE_HIT_RADIUS = 14 // screen px
+const EXTREMA_RADIUS = 4 // screen px
+const EXTREMA_MIN_PROMINENCE = 3 // image px
+const EXTREMA_MIN_SPACING = 28 // image px
+const EXTREMA_SMOOTH_WINDOW = 9
+const EXTREMA_ENDPOINT_MARGIN = 40 // image px
 
 const COLORS: Record<Role, { stroke: string; fill: string; paint: string }> = {
   outer: { stroke: '#ff5e5e', fill: 'rgba(255, 94, 94, 0.10)', paint: 'rgba(255, 94, 94, 0.20)' },
@@ -27,6 +32,7 @@ type Props = {
   strokes: { outer: Stroke[]; inner: Stroke[] }
   outerShape: RectShape | null
   innerShape: RectShape | null
+  hidePaint: boolean
   onAddStroke: (role: Role, stroke: Stroke) => void
   onCornerChange: (role: Role, index: number, p: Point) => void
 }
@@ -52,6 +58,63 @@ function paintRoleFromTool(tool: Tool): Role | null {
   return null
 }
 
+function movingAverage(values: number[], window: number): number[] {
+  const pad = Math.floor(window / 2)
+  return values.map((_, index) => {
+    const lo = Math.max(0, index - pad)
+    const hi = Math.min(values.length, index + pad + 1)
+    let sum = 0
+    for (let i = lo; i < hi; i++) sum += values[i]
+    return sum / (hi - lo)
+  })
+}
+
+function distance(a: Point, b: Point): number {
+  const dx = a[0] - b[0]
+  const dy = a[1] - b[1]
+  return Math.hypot(dx, dy)
+}
+
+function edgeExtrema(side: Polyline): Point[] {
+  if (side.length < EXTREMA_SMOOTH_WINDOW + 2) return []
+  const start = side[0]
+  const end = side[side.length - 1]
+  const dx = end[0] - start[0]
+  const dy = end[1] - start[1]
+  const len = Math.hypot(dx, dy)
+  if (len < 1) return []
+  const nx = -dy / len
+  const ny = dx / len
+  const offsets = side.map((p) => (p[0] - start[0]) * nx + (p[1] - start[1]) * ny)
+  const along = side.map((p) => ((p[0] - start[0]) * dx + (p[1] - start[1]) * dy) / len)
+  const smooth = movingAverage(offsets, EXTREMA_SMOOTH_WINDOW)
+  const candidates: { point: Point; prominence: number; index: number }[] = []
+  const radius = Math.max(4, Math.floor(side.length * 0.035))
+  for (let i = 1; i < smooth.length - 1; i++) {
+    if (along[i] < EXTREMA_ENDPOINT_MARGIN || len - along[i] < EXTREMA_ENDPOINT_MARGIN) continue
+    const prev = smooth[i] - smooth[i - 1]
+    const next = smooth[i + 1] - smooth[i]
+    const isMax = prev > 0 && next <= 0
+    const isMin = prev < 0 && next >= 0
+    if (!isMax && !isMin) continue
+    const lo = Math.max(0, i - radius)
+    const hi = Math.min(smooth.length, i + radius + 1)
+    const local = smooth.slice(lo, hi)
+    const prominence = isMax
+      ? smooth[i] - Math.min(...local)
+      : Math.max(...local) - smooth[i]
+    if (prominence < EXTREMA_MIN_PROMINENCE) continue
+    candidates.push({ point: side[i], prominence, index: i })
+  }
+
+  const kept: { point: Point; prominence: number; index: number }[] = []
+  for (const candidate of candidates.sort((a, b) => b.prominence - a.prominence)) {
+    if (kept.some((existing) => distance(existing.point, candidate.point) < EXTREMA_MIN_SPACING)) continue
+    kept.push(candidate)
+  }
+  return kept.sort((a, b) => a.index - b.index).map((candidate) => candidate.point)
+}
+
 export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
   {
     src,
@@ -62,6 +125,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     strokes,
     outerShape,
     innerShape,
+    hidePaint,
     onAddStroke,
     onCornerChange
   },
@@ -76,8 +140,8 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
   const [imageReady, setImageReady] = useState(false)
   const [cursorPos, setCursorPos] = useState<Point | null>(null)
 
-  const propsRef = useRef({ tool, brushRadius, strokes, outerShape, innerShape })
-  propsRef.current = { tool, brushRadius, strokes, outerShape, innerShape }
+  const propsRef = useRef({ tool, brushRadius, strokes, outerShape, innerShape, hidePaint })
+  propsRef.current = { tool, brushRadius, strokes, outerShape, innerShape, hidePaint }
 
   useLayoutEffect(() => {
     const el = containerRef.current
@@ -141,8 +205,10 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
   cursorRef.current = cursorPos
 
   const drawShape = useCallback(
-    (ctx: CanvasRenderingContext2D, shape: RectShape, color: { stroke: string; fill: string }) => {
+    (ctx: CanvasRenderingContext2D, shape: RectShape, color: { stroke: string; fill: string }, alpha = 1) => {
       const { tx, ty, scale } = viewRef.current
+      ctx.save()
+      ctx.globalAlpha = alpha
       ctx.beginPath()
       for (let s = 0; s < 4; s++) {
         const side = shape.sides[s]
@@ -164,6 +230,24 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       ctx.strokeStyle = color.stroke
       ctx.lineWidth = 2
       ctx.stroke()
+      // Interior extrema are the future editable nodes for each smooth edge.
+      for (const side of shape.sides) {
+        for (const [px, py] of edgeExtrema(side)) {
+          const sx = px * scale + tx
+          const sy = py * scale + ty
+          ctx.beginPath()
+          ctx.arc(sx, sy, EXTREMA_RADIUS + 2, 0, Math.PI * 2)
+          ctx.fillStyle = HALO_COLOR
+          ctx.fill()
+          ctx.beginPath()
+          ctx.arc(sx, sy, EXTREMA_RADIUS, 0, Math.PI * 2)
+          ctx.fillStyle = '#f4d35e'
+          ctx.fill()
+          ctx.strokeStyle = '#1a1a1a'
+          ctx.lineWidth = 1
+          ctx.stroke()
+        }
+      }
       // Corner handles with the same halo treatment.
       for (const [cx, cy] of shape.corners) {
         const sx = cx * scale + tx
@@ -180,6 +264,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
         ctx.lineWidth = 1.5
         ctx.stroke()
       }
+      ctx.restore()
     },
     []
   )
@@ -210,23 +295,32 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       ctx.drawImage(img, tx, ty, imageWidth * scale, imageHeight * scale)
     }
 
-    const { tool: curTool, brushRadius: curRadius, strokes: curStrokes, outerShape: os, innerShape: is } = propsRef.current
+    const {
+      tool: curTool,
+      brushRadius: curRadius,
+      strokes: curStrokes,
+      outerShape: os,
+      innerShape: is,
+      hidePaint: curHidePaint
+    } = propsRef.current
 
     // Painted strokes
-    for (const role of ROLES) {
-      ctx.fillStyle = COLORS[role].paint
-      const list = curStrokes[role]
-      for (const stroke of list) {
-        const r = stroke.radius * scale
-        for (const [px, py] of stroke.points) {
-          ctx.beginPath()
-          ctx.arc(px * scale + tx, py * scale + ty, r, 0, Math.PI * 2)
-          ctx.fill()
+    if (!curHidePaint) {
+      for (const role of ROLES) {
+        ctx.fillStyle = COLORS[role].paint
+        const list = curStrokes[role]
+        for (const stroke of list) {
+          const r = stroke.radius * scale
+          for (const [px, py] of stroke.points) {
+            ctx.beginPath()
+            ctx.arc(px * scale + tx, py * scale + ty, r, 0, Math.PI * 2)
+            ctx.fill()
+          }
         }
       }
     }
     const drag = dragRef.current
-    if (drag?.kind === 'paint') {
+    if (!curHidePaint && drag?.kind === 'paint') {
       ctx.fillStyle = COLORS[drag.role].paint
       const r = curRadius * scale
       for (const [px, py] of drag.points) {
@@ -237,12 +331,13 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     }
 
     // Rectangles
-    if (os) drawShape(ctx, os, COLORS.outer)
-    if (is) drawShape(ctx, is, COLORS.inner)
+    const shapeAlpha = curHidePaint ? 0.5 : 1
+    if (os) drawShape(ctx, os, COLORS.outer, shapeAlpha)
+    if (is) drawShape(ctx, is, COLORS.inner, shapeAlpha)
 
     // Brush preview ring
     const role = paintRoleFromTool(curTool)
-    if (role && cursorRef.current) {
+    if (!curHidePaint && role && cursorRef.current) {
       const [cx, cy] = cursorRef.current
       ctx.beginPath()
       ctx.arc(cx, cy, curRadius * scale, 0, Math.PI * 2)
@@ -262,7 +357,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
 
   useEffect(() => {
     requestDraw()
-  }, [containerSize, imageReady, strokes, outerShape, innerShape, brushRadius, tool, requestDraw])
+  }, [containerSize, imageReady, strokes, outerShape, innerShape, brushRadius, tool, hidePaint, requestDraw])
 
   const screenToImage = useCallback((sx: number, sy: number): Point => {
     const { tx, ty, scale } = viewRef.current
