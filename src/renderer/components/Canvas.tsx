@@ -7,34 +7,37 @@ import {
   useRef,
   useState
 } from 'react'
-import type { Quad, Point, Tool, Role, Stroke, RectShape, Polyline } from '../../shared/types'
+import type { BezierNode, Point, RectPath, Role, Tool } from '../../shared/types'
 
-const HANDLE_RADIUS = 8 // screen px
-const HANDLE_HIT_RADIUS = 14 // screen px
-const EXTREMA_RADIUS = 4 // screen px
-const EXTREMA_MIN_PROMINENCE = 3 // image px
-const EXTREMA_MIN_SPACING = 28 // image px
-const EXTREMA_SMOOTH_WINDOW = 9
-const EXTREMA_ENDPOINT_MARGIN = 40 // image px
+const NODE_RADIUS = 7 // screen px
+const NODE_HIT_RADIUS = 12 // screen px
+const HANDLE_RADIUS = 5 // screen px
+const HANDLE_HIT_RADIUS = 10 // screen px
+const SEGMENT_HIT_RADIUS = 9 // screen px
+const CURVE_SAMPLE_STEPS = 36
+const DEFAULT_HANDLE_LENGTH = 60 // image px
 
-const COLORS: Record<Role, { stroke: string; fill: string; paint: string }> = {
-  outer: { stroke: '#ff5e5e', fill: 'rgba(255, 94, 94, 0.10)', paint: 'rgba(255, 94, 94, 0.20)' },
-  inner: { stroke: '#4ea1ff', fill: 'rgba(78, 161, 255, 0.10)', paint: 'rgba(78, 161, 255, 0.20)' }
+const COLORS: Record<Role, { stroke: string; fill: string; guide: string }> = {
+  outer: { stroke: '#ff5e5e', fill: 'rgba(255, 94, 94, 0.08)', guide: 'rgba(255, 94, 94, 0.42)' },
+  inner: { stroke: '#4ea1ff', fill: 'rgba(78, 161, 255, 0.08)', guide: 'rgba(78, 161, 255, 0.42)' }
 }
 const HALO_COLOR = 'rgba(0, 0, 0, 0.85)'
+const SIDE_NODE_COLOR = '#f4d35e'
 
 type Props = {
   src: string
   imageWidth: number
   imageHeight: number
   tool: Tool
-  brushRadius: number  // image-space radius
-  strokes: { outer: Stroke[]; inner: Stroke[] }
-  outerShape: RectShape | null
-  innerShape: RectShape | null
-  hidePaint: boolean
-  onAddStroke: (role: Role, stroke: Stroke) => void
-  onCornerChange: (role: Role, index: number, p: Point) => void
+  outerPath: RectPath | null
+  innerPath: RectPath | null
+  outerDraft: Point[]
+  innerDraft: Point[]
+  hideGuides: boolean
+  onAppendCorner: (role: Role, point: Point) => void
+  onNodeChange: (role: Role, index: number, point: Point) => void
+  onHandleChange: (role: Role, index: number, handle: Point) => void
+  onInsertNode: (role: Role, segmentIndex: number, node: BezierNode) => void
 }
 
 export type CanvasHandle = {
@@ -46,73 +49,84 @@ type View = { tx: number; ty: number; scale: number }
 
 type Drag =
   | { kind: 'pan'; lastX: number; lastY: number }
-  | { kind: 'corner'; role: Role; index: number }
-  | { kind: 'paint'; role: Role; points: Point[] }
+  | { kind: 'node'; role: Role; index: number }
+  | { kind: 'handle'; role: Role; index: number; side: 'in' | 'out' }
   | null
+
+type HoverSegment = { role: Role; index: number; point: Point; tangent: Point } | null
 
 const ROLES: Role[] = ['outer', 'inner']
 
-function paintRoleFromTool(tool: Tool): Role | null {
-  if (tool === 'paint-outer') return 'outer'
-  if (tool === 'paint-inner') return 'inner'
+function roleFromTool(tool: Tool): Role | null {
+  if (tool === 'pen-outer') return 'outer'
+  if (tool === 'pen-inner') return 'inner'
   return null
 }
 
-function movingAverage(values: number[], window: number): number[] {
-  const pad = Math.floor(window / 2)
-  return values.map((_, index) => {
-    const lo = Math.max(0, index - pad)
-    const hi = Math.min(values.length, index + pad + 1)
-    let sum = 0
-    for (let i = lo; i < hi; i++) sum += values[i]
-    return sum / (hi - lo)
-  })
+function add(a: Point, b: Point): Point {
+  return [a[0] + b[0], a[1] + b[1]]
+}
+
+function sub(a: Point, b: Point): Point {
+  return [a[0] - b[0], a[1] - b[1]]
+}
+
+function mul(a: Point, scalar: number): Point {
+  return [a[0] * scalar, a[1] * scalar]
 }
 
 function distance(a: Point, b: Point): number {
-  const dx = a[0] - b[0]
-  const dy = a[1] - b[1]
-  return Math.hypot(dx, dy)
+  return Math.hypot(a[0] - b[0], a[1] - b[1])
 }
 
-function edgeExtrema(side: Polyline): Point[] {
-  if (side.length < EXTREMA_SMOOTH_WINDOW + 2) return []
-  const start = side[0]
-  const end = side[side.length - 1]
-  const dx = end[0] - start[0]
-  const dy = end[1] - start[1]
-  const len = Math.hypot(dx, dy)
-  if (len < 1) return []
-  const nx = -dy / len
-  const ny = dx / len
-  const offsets = side.map((p) => (p[0] - start[0]) * nx + (p[1] - start[1]) * ny)
-  const along = side.map((p) => ((p[0] - start[0]) * dx + (p[1] - start[1]) * dy) / len)
-  const smooth = movingAverage(offsets, EXTREMA_SMOOTH_WINDOW)
-  const candidates: { point: Point; prominence: number; index: number }[] = []
-  const radius = Math.max(4, Math.floor(side.length * 0.035))
-  for (let i = 1; i < smooth.length - 1; i++) {
-    if (along[i] < EXTREMA_ENDPOINT_MARGIN || len - along[i] < EXTREMA_ENDPOINT_MARGIN) continue
-    const prev = smooth[i] - smooth[i - 1]
-    const next = smooth[i + 1] - smooth[i]
-    const isMax = prev > 0 && next <= 0
-    const isMin = prev < 0 && next >= 0
-    if (!isMax && !isMin) continue
-    const lo = Math.max(0, i - radius)
-    const hi = Math.min(smooth.length, i + radius + 1)
-    const local = smooth.slice(lo, hi)
-    const prominence = isMax
-      ? smooth[i] - Math.min(...local)
-      : Math.max(...local) - smooth[i]
-    if (prominence < EXTREMA_MIN_PROMINENCE) continue
-    candidates.push({ point: side[i], prominence, index: i })
-  }
+function clampPoint(p: Point, width: number, height: number): Point {
+  return [
+    Math.max(0, Math.min(width, p[0])),
+    Math.max(0, Math.min(height, p[1]))
+  ]
+}
 
-  const kept: { point: Point; prominence: number; index: number }[] = []
-  for (const candidate of candidates.sort((a, b) => b.prominence - a.prominence)) {
-    if (kept.some((existing) => distance(existing.point, candidate.point) < EXTREMA_MIN_SPACING)) continue
-    kept.push(candidate)
-  }
-  return kept.sort((a, b) => a.index - b.index).map((candidate) => candidate.point)
+function nodeOutHandle(node: BezierNode): Point {
+  return node.corner ? node.point : add(node.point, node.handle)
+}
+
+function nodeInHandle(node: BezierNode): Point {
+  return node.corner ? node.point : sub(node.point, node.handle)
+}
+
+function cubicPoint(a: Point, b: Point, c: Point, d: Point, t: number): Point {
+  const mt = 1 - t
+  const mt2 = mt * mt
+  const t2 = t * t
+  return [
+    mt2 * mt * a[0] + 3 * mt2 * t * b[0] + 3 * mt * t2 * c[0] + t2 * t * d[0],
+    mt2 * mt * a[1] + 3 * mt2 * t * b[1] + 3 * mt * t2 * c[1] + t2 * t * d[1]
+  ]
+}
+
+function cubicTangent(a: Point, b: Point, c: Point, d: Point, t: number): Point {
+  const mt = 1 - t
+  return [
+    3 * mt * mt * (b[0] - a[0]) + 6 * mt * t * (c[0] - b[0]) + 3 * t * t * (d[0] - c[0]),
+    3 * mt * mt * (b[1] - a[1]) + 6 * mt * t * (c[1] - b[1]) + 3 * t * t * (d[1] - c[1])
+  ]
+}
+
+function closestPointOnSegment(p: Point, a: Point, b: Point): { point: Point; t: number; distance: number } {
+  const ab = sub(b, a)
+  const len2 = ab[0] * ab[0] + ab[1] * ab[1]
+  const t = len2 <= 1e-6 ? 0 : Math.max(0, Math.min(1, ((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / len2))
+  const point = add(a, mul(ab, t))
+  return { point, t, distance: distance(p, point) }
+}
+
+function defaultNodeHandle(tangent: Point): Point {
+  const len = Math.hypot(tangent[0], tangent[1])
+  if (len < 1e-6) return [0, 0]
+  return [
+    (tangent[0] / len) * DEFAULT_HANDLE_LENGTH,
+    (tangent[1] / len) * DEFAULT_HANDLE_LENGTH
+  ]
 }
 
 export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
@@ -121,13 +135,15 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     imageWidth,
     imageHeight,
     tool,
-    brushRadius,
-    strokes,
-    outerShape,
-    innerShape,
-    hidePaint,
-    onAddStroke,
-    onCornerChange
+    outerPath,
+    innerPath,
+    outerDraft,
+    innerDraft,
+    hideGuides,
+    onAppendCorner,
+    onNodeChange,
+    onHandleChange,
+    onInsertNode
   },
   ref
 ) {
@@ -136,12 +152,14 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
   const imageRef = useRef<HTMLImageElement | null>(null)
   const viewRef = useRef<View>({ tx: 0, ty: 0, scale: 1 })
   const dragRef = useRef<Drag>(null)
+  const hoverSegmentRef = useRef<HoverSegment>(null)
+  const drawScheduledRef = useRef(false)
+  const drawRef = useRef<() => void>(() => {})
   const [containerSize, setContainerSize] = useState({ w: 0, h: 0 })
   const [imageReady, setImageReady] = useState(false)
-  const [cursorPos, setCursorPos] = useState<Point | null>(null)
 
-  const propsRef = useRef({ tool, brushRadius, strokes, outerShape, innerShape, hidePaint })
-  propsRef.current = { tool, brushRadius, strokes, outerShape, innerShape, hidePaint }
+  const propsRef = useRef({ tool, outerPath, innerPath, outerDraft, innerDraft, hideGuides })
+  propsRef.current = { tool, outerPath, innerPath, outerDraft, innerDraft, hideGuides }
 
   useLayoutEffect(() => {
     const el = containerRef.current
@@ -169,6 +187,12 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     }
   }, [src])
 
+  const requestDraw = useCallback(() => {
+    if (drawScheduledRef.current) return
+    drawScheduledRef.current = true
+    requestAnimationFrame(() => drawRef.current())
+  }, [])
+
   const fitToView = useCallback(() => {
     const { w, h } = containerSize
     if (w === 0 || h === 0) return
@@ -182,7 +206,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       ty: (h - imageHeight * scale) / 2
     }
     requestDraw()
-  }, [containerSize, imageWidth, imageHeight])
+  }, [containerSize, imageWidth, imageHeight, requestDraw])
 
   const zoomToActualSize = useCallback(() => {
     const { w, h } = containerSize
@@ -192,7 +216,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       ty: (h - imageHeight) / 2
     }
     requestDraw()
-  }, [containerSize, imageWidth, imageHeight])
+  }, [containerSize, imageWidth, imageHeight, requestDraw])
 
   useEffect(() => {
     if (imageReady && containerSize.w > 0) fitToView()
@@ -200,29 +224,47 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
 
   useImperativeHandle(ref, () => ({ fitToView, zoomToActualSize }), [fitToView, zoomToActualSize])
 
-  const drawScheduledRef = useRef(false)
-  const cursorRef = useRef<Point | null>(cursorPos)
-  cursorRef.current = cursorPos
+  const imageToScreen = useCallback((ix: number, iy: number): Point => {
+    const { tx, ty, scale } = viewRef.current
+    return [ix * scale + tx, iy * scale + ty]
+  }, [])
 
-  const drawShape = useCallback(
-    (ctx: CanvasRenderingContext2D, shape: RectShape, color: { stroke: string; fill: string }, alpha = 1) => {
+  const screenToImage = useCallback((sx: number, sy: number): Point => {
+    const { tx, ty, scale } = viewRef.current
+    return [(sx - tx) / scale, (sy - ty) / scale]
+  }, [])
+
+  const pathForRole = useCallback((role: Role): RectPath | null => {
+    return role === 'outer' ? propsRef.current.outerPath : propsRef.current.innerPath
+  }, [])
+
+  const drawPath = useCallback(
+    (ctx: CanvasRenderingContext2D, path: RectPath, role: Role, activeRole: Role | null, alpha = 1) => {
       const { tx, ty, scale } = viewRef.current
+      const color = COLORS[role]
+      const active = activeRole === role
       ctx.save()
       ctx.globalAlpha = alpha
       ctx.beginPath()
-      for (let s = 0; s < 4; s++) {
-        const side = shape.sides[s]
-        for (let i = 0; i < side.length; i++) {
-          const sx = side[i][0] * scale + tx
-          const sy = side[i][1] * scale + ty
-          if (s === 0 && i === 0) ctx.moveTo(sx, sy)
-          else ctx.lineTo(sx, sy)
-        }
+      const first = path.nodes[0]
+      ctx.moveTo(first.point[0] * scale + tx, first.point[1] * scale + ty)
+      for (let i = 0; i < path.nodes.length; i++) {
+        const a = path.nodes[i]
+        const b = path.nodes[(i + 1) % path.nodes.length]
+        const cp1 = nodeOutHandle(a)
+        const cp2 = nodeInHandle(b)
+        ctx.bezierCurveTo(
+          cp1[0] * scale + tx,
+          cp1[1] * scale + ty,
+          cp2[0] * scale + tx,
+          cp2[1] * scale + ty,
+          b.point[0] * scale + tx,
+          b.point[1] * scale + ty
+        )
       }
       ctx.closePath()
       ctx.fillStyle = color.fill
       ctx.fill()
-      // Dark halo, then bright line on top — readable against any color paint.
       ctx.lineJoin = 'round'
       ctx.strokeStyle = HALO_COLOR
       ctx.lineWidth = 5
@@ -230,44 +272,95 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       ctx.strokeStyle = color.stroke
       ctx.lineWidth = 2
       ctx.stroke()
-      // Interior extrema are the future editable nodes for each smooth edge.
-      for (const side of shape.sides) {
-        for (const [px, py] of edgeExtrema(side)) {
-          const sx = px * scale + tx
-          const sy = py * scale + ty
-          ctx.beginPath()
-          ctx.arc(sx, sy, EXTREMA_RADIUS + 2, 0, Math.PI * 2)
-          ctx.fillStyle = HALO_COLOR
-          ctx.fill()
-          ctx.beginPath()
-          ctx.arc(sx, sy, EXTREMA_RADIUS, 0, Math.PI * 2)
-          ctx.fillStyle = '#f4d35e'
-          ctx.fill()
-          ctx.strokeStyle = '#1a1a1a'
+
+      if (active && !hideGuides) {
+        for (const node of path.nodes) {
+          if (node.corner) continue
+          const p = imageToScreen(node.point[0], node.point[1])
+          const out = imageToScreen(node.point[0] + node.handle[0], node.point[1] + node.handle[1])
+          const inn = imageToScreen(node.point[0] - node.handle[0], node.point[1] - node.handle[1])
+          ctx.strokeStyle = color.guide
           ctx.lineWidth = 1
+          ctx.beginPath()
+          ctx.moveTo(inn[0], inn[1])
+          ctx.lineTo(out[0], out[1])
           ctx.stroke()
+          for (const h of [inn, out]) {
+            ctx.beginPath()
+            ctx.arc(h[0], h[1], HANDLE_RADIUS + 2, 0, Math.PI * 2)
+            ctx.fillStyle = HALO_COLOR
+            ctx.fill()
+            ctx.beginPath()
+            ctx.arc(h[0], h[1], HANDLE_RADIUS, 0, Math.PI * 2)
+            ctx.fillStyle = '#fff3a0'
+            ctx.fill()
+            ctx.strokeStyle = '#1a1a1a'
+            ctx.lineWidth = 1
+            ctx.stroke()
+          }
+          ctx.beginPath()
+          ctx.arc(p[0], p[1], 2, 0, Math.PI * 2)
+          ctx.fillStyle = color.stroke
+          ctx.fill()
         }
       }
-      // Corner handles with the same halo treatment.
-      for (const [cx, cy] of shape.corners) {
-        const sx = cx * scale + tx
-        const sy = cy * scale + ty
+
+      for (const node of path.nodes) {
+        const [sx, sy] = imageToScreen(node.point[0], node.point[1])
+        const radius = node.corner ? NODE_RADIUS : NODE_RADIUS - 1
         ctx.beginPath()
-        ctx.arc(sx, sy, HANDLE_RADIUS + 2, 0, Math.PI * 2)
+        ctx.arc(sx, sy, radius + 2, 0, Math.PI * 2)
         ctx.fillStyle = HALO_COLOR
         ctx.fill()
         ctx.beginPath()
-        ctx.arc(sx, sy, HANDLE_RADIUS, 0, Math.PI * 2)
-        ctx.fillStyle = color.stroke
+        ctx.arc(sx, sy, radius, 0, Math.PI * 2)
+        ctx.fillStyle = node.corner ? color.stroke : SIDE_NODE_COLOR
         ctx.fill()
         ctx.strokeStyle = '#fff'
-        ctx.lineWidth = 1.5
+        ctx.lineWidth = 1.4
         ctx.stroke()
       }
       ctx.restore()
     },
-    []
+    [hideGuides, imageToScreen]
   )
+
+  const drawDraft = useCallback((ctx: CanvasRenderingContext2D, points: Point[], role: Role) => {
+    if (points.length === 0) return
+    const color = COLORS[role]
+    ctx.save()
+    ctx.setLineDash([6, 4])
+    ctx.strokeStyle = color.stroke
+    ctx.lineWidth = 2
+    ctx.beginPath()
+    points.forEach((point, index) => {
+      const [sx, sy] = imageToScreen(point[0], point[1])
+      if (index === 0) ctx.moveTo(sx, sy)
+      else ctx.lineTo(sx, sy)
+    })
+    ctx.stroke()
+    ctx.setLineDash([])
+    points.forEach((point, index) => {
+      const [sx, sy] = imageToScreen(point[0], point[1])
+      ctx.beginPath()
+      ctx.arc(sx, sy, NODE_RADIUS + 2, 0, Math.PI * 2)
+      ctx.fillStyle = HALO_COLOR
+      ctx.fill()
+      ctx.beginPath()
+      ctx.arc(sx, sy, NODE_RADIUS, 0, Math.PI * 2)
+      ctx.fillStyle = color.stroke
+      ctx.fill()
+      ctx.strokeStyle = '#fff'
+      ctx.lineWidth = 1.4
+      ctx.stroke()
+      ctx.fillStyle = '#fff'
+      ctx.font = '10px sans-serif'
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(String(index + 1), sx, sy)
+    })
+    ctx.restore()
+  }, [imageToScreen])
 
   const draw = useCallback(() => {
     drawScheduledRef.current = false
@@ -295,114 +388,147 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       ctx.drawImage(img, tx, ty, imageWidth * scale, imageHeight * scale)
     }
 
-    const {
-      tool: curTool,
-      brushRadius: curRadius,
-      strokes: curStrokes,
-      outerShape: os,
-      innerShape: is,
-      hidePaint: curHidePaint
-    } = propsRef.current
+    const { tool: curTool, outerPath: op, innerPath: ip, outerDraft: od, innerDraft: id } = propsRef.current
+    const activeRole = roleFromTool(curTool)
+    if (op) drawPath(ctx, op, 'outer', activeRole, 1)
+    if (ip) drawPath(ctx, ip, 'inner', activeRole, 1)
+    drawDraft(ctx, od, 'outer')
+    drawDraft(ctx, id, 'inner')
 
-    // Painted strokes
-    if (!curHidePaint) {
-      for (const role of ROLES) {
-        ctx.fillStyle = COLORS[role].paint
-        const list = curStrokes[role]
-        for (const stroke of list) {
-          const r = stroke.radius * scale
-          for (const [px, py] of stroke.points) {
-            ctx.beginPath()
-            ctx.arc(px * scale + tx, py * scale + ty, r, 0, Math.PI * 2)
-            ctx.fill()
-          }
-        }
-      }
-    }
-    const drag = dragRef.current
-    if (!curHidePaint && drag?.kind === 'paint') {
-      ctx.fillStyle = COLORS[drag.role].paint
-      const r = curRadius * scale
-      for (const [px, py] of drag.points) {
-        ctx.beginPath()
-        ctx.arc(px * scale + tx, py * scale + ty, r, 0, Math.PI * 2)
-        ctx.fill()
-      }
-    }
-
-    // Rectangles
-    const shapeAlpha = curHidePaint ? 0.5 : 1
-    if (os) drawShape(ctx, os, COLORS.outer, shapeAlpha)
-    if (is) drawShape(ctx, is, COLORS.inner, shapeAlpha)
-
-    // Brush preview ring
-    const role = paintRoleFromTool(curTool)
-    if (!curHidePaint && role && cursorRef.current) {
-      const [cx, cy] = cursorRef.current
+    const hover = hoverSegmentRef.current
+    if (hover && activeRole === hover.role) {
+      const [sx, sy] = imageToScreen(hover.point[0], hover.point[1])
+      ctx.save()
       ctx.beginPath()
-      ctx.arc(cx, cy, curRadius * scale, 0, Math.PI * 2)
-      ctx.strokeStyle = COLORS[role].stroke
-      ctx.lineWidth = 1
-      ctx.setLineDash([4, 3])
+      ctx.arc(sx, sy, NODE_RADIUS + 3, 0, Math.PI * 2)
+      ctx.fillStyle = HALO_COLOR
+      ctx.fill()
+      ctx.beginPath()
+      ctx.arc(sx, sy, NODE_RADIUS, 0, Math.PI * 2)
+      ctx.fillStyle = SIDE_NODE_COLOR
+      ctx.fill()
+      ctx.strokeStyle = '#111'
+      ctx.lineWidth = 1.5
       ctx.stroke()
-      ctx.setLineDash([])
+      ctx.strokeStyle = '#111'
+      ctx.lineWidth = 2
+      ctx.beginPath()
+      ctx.moveTo(sx - 4, sy)
+      ctx.lineTo(sx + 4, sy)
+      ctx.moveTo(sx, sy - 4)
+      ctx.lineTo(sx, sy + 4)
+      ctx.stroke()
+      ctx.restore()
     }
-  }, [containerSize, imageWidth, imageHeight, drawShape])
-
-  const requestDraw = useCallback(() => {
-    if (drawScheduledRef.current) return
-    drawScheduledRef.current = true
-    requestAnimationFrame(draw)
-  }, [draw])
+  }, [containerSize, drawDraft, drawPath, imageHeight, imageToScreen, imageWidth])
+  drawRef.current = draw
 
   useEffect(() => {
     requestDraw()
-  }, [containerSize, imageReady, strokes, outerShape, innerShape, brushRadius, tool, hidePaint, requestDraw])
+  }, [containerSize, imageReady, outerPath, innerPath, outerDraft, innerDraft, tool, hideGuides, requestDraw])
 
-  const screenToImage = useCallback((sx: number, sy: number): Point => {
-    const { tx, ty, scale } = viewRef.current
-    return [(sx - tx) / scale, (sy - ty) / scale]
-  }, [])
-  const imageToScreen = useCallback((ix: number, iy: number): Point => {
-    const { tx, ty, scale } = viewRef.current
-    return [ix * scale + tx, iy * scale + ty]
-  }, [])
+  const findSegmentHit = useCallback((role: Role, screenPoint: Point): HoverSegment => {
+    const path = pathForRole(role)
+    if (!path) return null
+    let best: HoverSegment = null
+    let bestDistance = SEGMENT_HIT_RADIUS
+    for (let i = 0; i < path.nodes.length; i++) {
+      const a = path.nodes[i]
+      const b = path.nodes[(i + 1) % path.nodes.length]
+      const cp1 = nodeOutHandle(a)
+      const cp2 = nodeInHandle(b)
+      let prev = imageToScreen(a.point[0], a.point[1])
+      for (let step = 1; step <= CURVE_SAMPLE_STEPS; step++) {
+        const t = step / CURVE_SAMPLE_STEPS
+        const imagePoint = cubicPoint(a.point, cp1, cp2, b.point, t)
+        const cur = imageToScreen(imagePoint[0], imagePoint[1])
+        const hit = closestPointOnSegment(screenPoint, prev, cur)
+        if (hit.distance < bestDistance) {
+          const sampleT = (step - 1 + hit.t) / CURVE_SAMPLE_STEPS
+          const point = cubicPoint(a.point, cp1, cp2, b.point, sampleT)
+          const tangent = cubicTangent(a.point, cp1, cp2, b.point, sampleT)
+          bestDistance = hit.distance
+          best = { role, index: i, point, tangent }
+        }
+        prev = cur
+      }
+    }
+    return best
+  }, [imageToScreen, pathForRole])
+
+  const findEditHit = useCallback((role: Role, screenPoint: Point): Drag => {
+    const path = pathForRole(role)
+    if (!path) return null
+    for (let i = 0; i < path.nodes.length; i++) {
+      const node = path.nodes[i]
+      if (node.corner) continue
+      const out = imageToScreen(node.point[0] + node.handle[0], node.point[1] + node.handle[1])
+      const inn = imageToScreen(node.point[0] - node.handle[0], node.point[1] - node.handle[1])
+      if (distance(screenPoint, out) <= HANDLE_HIT_RADIUS) return { kind: 'handle', role, index: i, side: 'out' }
+      if (distance(screenPoint, inn) <= HANDLE_HIT_RADIUS) return { kind: 'handle', role, index: i, side: 'in' }
+    }
+    for (let i = 0; i < path.nodes.length; i++) {
+      const node = path.nodes[i]
+      const p = imageToScreen(node.point[0], node.point[1])
+      if (distance(screenPoint, p) <= NODE_HIT_RADIUS) return { kind: 'node', role, index: i }
+    }
+    return null
+  }, [imageToScreen, pathForRole])
 
   const onPointerDown = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
       const canvas = canvasRef.current
       if (!canvas) return
       const rect = canvas.getBoundingClientRect()
-      const x = e.clientX - rect.left
-      const y = e.clientY - rect.top
-      const role = paintRoleFromTool(tool)
+      const screenPoint: Point = [e.clientX - rect.left, e.clientY - rect.top]
+      const activeRole = roleFromTool(tool)
 
-      if (role) {
-        const ip = screenToImage(x, y)
-        dragRef.current = { kind: 'paint', role, points: [ip] }
-        canvas.setPointerCapture(e.pointerId)
-        requestDraw()
-        return
-      }
+      if (activeRole) {
+        const editHit = findEditHit(activeRole, screenPoint)
+        if (editHit) {
+          dragRef.current = editHit
+          canvas.setPointerCapture(e.pointerId)
+          return
+        }
 
-      for (const r of ROLES) {
-        const shape = r === 'outer' ? outerShape : innerShape
-        if (!shape) continue
-        for (let i = 0; i < 4; i++) {
-          const [hx, hy] = imageToScreen(shape.corners[i][0], shape.corners[i][1])
-          const dx = x - hx
-          const dy = y - hy
-          if (dx * dx + dy * dy <= HANDLE_HIT_RADIUS * HANDLE_HIT_RADIUS) {
-            dragRef.current = { kind: 'corner', role: r, index: i }
+        const path = pathForRole(activeRole)
+        if (path) {
+          const segmentHit = findSegmentHit(activeRole, screenPoint)
+          if (segmentHit) {
+            const node: BezierNode = {
+              point: clampPoint(segmentHit.point, imageWidth, imageHeight),
+              handle: defaultNodeHandle(segmentHit.tangent),
+              corner: false
+            }
+            const insertAt = segmentHit.index === path.nodes.length - 1 ? path.nodes.length : segmentHit.index + 1
+            onInsertNode(activeRole, segmentHit.index, node)
+            dragRef.current = { kind: 'node', role: activeRole, index: insertAt }
             canvas.setPointerCapture(e.pointerId)
+            requestDraw()
             return
           }
+        } else {
+          onAppendCorner(activeRole, clampPoint(screenToImage(screenPoint[0], screenPoint[1]), imageWidth, imageHeight))
+          requestDraw()
+          return
         }
       }
-      dragRef.current = { kind: 'pan', lastX: x, lastY: y }
+
+      dragRef.current = { kind: 'pan', lastX: screenPoint[0], lastY: screenPoint[1] }
       canvas.setPointerCapture(e.pointerId)
     },
-    [tool, outerShape, innerShape, screenToImage, imageToScreen, requestDraw]
+    [
+      findEditHit,
+      findSegmentHit,
+      imageHeight,
+      imageWidth,
+      onAppendCorner,
+      onInsertNode,
+      pathForRole,
+      requestDraw,
+      screenToImage,
+      tool
+    ]
   )
 
   const onPointerMove = useCallback(
@@ -410,82 +536,73 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       const canvas = canvasRef.current
       if (!canvas) return
       const rect = canvas.getBoundingClientRect()
-      const x = e.clientX - rect.left
-      const y = e.clientY - rect.top
-      setCursorPos([x, y])
-
+      const screenPoint: Point = [e.clientX - rect.left, e.clientY - rect.top]
       const drag = dragRef.current
+
       if (!drag) {
-        if (paintRoleFromTool(tool)) {
-          canvas.style.cursor = 'crosshair'
-        } else {
-          let onHandle = false
-          for (const r of ROLES) {
-            const shape = r === 'outer' ? outerShape : innerShape
-            if (!shape) continue
-            for (let i = 0; i < 4; i++) {
-              const [hx, hy] = imageToScreen(shape.corners[i][0], shape.corners[i][1])
-              const dx = x - hx
-              const dy = y - hy
-              if (dx * dx + dy * dy <= HANDLE_HIT_RADIUS * HANDLE_HIT_RADIUS) {
-                onHandle = true
-                break
-              }
-            }
-            if (onHandle) break
-          }
-          canvas.style.cursor = onHandle ? 'grab' : 'default'
-        }
+        const activeRole = roleFromTool(tool)
+        const editHit = activeRole ? findEditHit(activeRole, screenPoint) : null
+        const segmentHit = activeRole && !editHit ? findSegmentHit(activeRole, screenPoint) : null
+        hoverSegmentRef.current = segmentHit
+        if (editHit?.kind === 'node' || editHit?.kind === 'handle') canvas.style.cursor = 'grab'
+        else if (segmentHit) canvas.style.cursor = 'copy'
+        else if (activeRole && !pathForRole(activeRole)) canvas.style.cursor = 'crosshair'
+        else canvas.style.cursor = tool === 'pan' ? 'grab' : 'default'
         requestDraw()
         return
       }
+
+      hoverSegmentRef.current = null
       if (drag.kind === 'pan') {
-        viewRef.current.tx += x - drag.lastX
-        viewRef.current.ty += y - drag.lastY
-        drag.lastX = x
-        drag.lastY = y
+        viewRef.current.tx += screenPoint[0] - drag.lastX
+        viewRef.current.ty += screenPoint[1] - drag.lastY
+        drag.lastX = screenPoint[0]
+        drag.lastY = screenPoint[1]
         requestDraw()
         return
       }
-      if (drag.kind === 'corner') {
-        const [ix, iy] = screenToImage(x, y)
-        onCornerChange(drag.role, drag.index, [
-          Math.max(0, Math.min(imageWidth, ix)),
-          Math.max(0, Math.min(imageHeight, iy))
-        ])
+
+      const imagePoint = clampPoint(screenToImage(screenPoint[0], screenPoint[1]), imageWidth, imageHeight)
+      if (drag.kind === 'node') {
+        onNodeChange(drag.role, drag.index, imagePoint)
         return
       }
-      if (drag.kind === 'paint') {
-        const ip = screenToImage(x, y)
-        const last = drag.points[drag.points.length - 1]
-        const dx = ip[0] - last[0]
-        const dy = ip[1] - last[1]
-        if (dx * dx + dy * dy >= (brushRadius * 0.25) ** 2) {
-          drag.points.push(ip)
-          requestDraw()
-        }
-        return
+      if (drag.kind === 'handle') {
+        const path = pathForRole(drag.role)
+        const node = path?.nodes[drag.index]
+        if (!node) return
+        const nextHandle = drag.side === 'out'
+          ? sub(imagePoint, node.point)
+          : sub(node.point, imagePoint)
+        onHandleChange(drag.role, drag.index, nextHandle)
       }
     },
-    [tool, outerShape, innerShape, screenToImage, imageToScreen, imageWidth, imageHeight, onCornerChange, brushRadius, requestDraw]
+    [
+      findEditHit,
+      findSegmentHit,
+      imageHeight,
+      imageWidth,
+      onHandleChange,
+      onNodeChange,
+      pathForRole,
+      requestDraw,
+      screenToImage,
+      tool
+    ]
   )
 
   const onPointerUp = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
       const canvas = canvasRef.current
       if (canvas?.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId)
-      const drag = dragRef.current
       dragRef.current = null
-      if (drag?.kind === 'paint' && drag.points.length > 0) {
-        onAddStroke(drag.role, { points: drag.points, radius: brushRadius })
-      }
       requestDraw()
     },
-    [brushRadius, onAddStroke, requestDraw]
+    [requestDraw]
   )
 
   const onPointerLeave = useCallback(() => {
-    setCursorPos(null)
+    hoverSegmentRef.current = null
     requestDraw()
   }, [requestDraw])
 
@@ -530,7 +647,3 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     </div>
   )
 })
-
-// Suppress unused-import warnings — both types are part of the public Canvas
-// surface area through state shapes the parent consumes.
-export type { Quad, Polyline }

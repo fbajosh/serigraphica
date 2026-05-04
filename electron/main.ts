@@ -171,38 +171,6 @@ ipcMain.handle('open-image-path', async (_evt, imagePath: string) => {
   return loadImage(imagePath)
 })
 
-ipcMain.handle('detect-outer-rect', async (_evt, imagePath: string) => {
-  return sidecar.call('detect_outer_rect', { path: imagePath })
-})
-
-ipcMain.handle(
-  'derive-from-strokes',
-  async (
-    _evt,
-    imagePath: string,
-    imageWidth: number,
-    imageHeight: number,
-    outerStrokes: unknown[],
-    innerStrokes: unknown[]
-  ) => {
-    if (process.env.ELECTRON_RENDERER_URL) {
-      await sidecar.restart()
-    }
-    return sidecar.call('derive_from_strokes', {
-      path: imagePath,
-      image_width: imageWidth,
-      image_height: imageHeight,
-      outer_strokes: outerStrokes,
-      inner_strokes: innerStrokes
-    })
-  }
-)
-
-ipcMain.handle('restart-fit-engine', async () => {
-  await sidecar.restart()
-  return { ok: true }
-})
-
 ipcMain.handle('export-corrected', async (_evt, imagePath: string, corners: number[][], quality: number) => {
   const dir = dirname(imagePath)
   const base = basename(imagePath, extname(imagePath))

@@ -15,8 +15,6 @@ import traceback
 
 import cv2
 
-from detect import detect_outer_rect
-from derive import derive_from_strokes
 from transform import export_corrected
 
 
@@ -27,20 +25,6 @@ def _image_meta(params: dict) -> dict:
         raise RuntimeError(f"failed to read image: {path}")
     h, w = img.shape[:2]
     return {"width": int(w), "height": int(h)}
-
-
-def _detect_outer_rect(params: dict) -> dict:
-    return detect_outer_rect(params["path"])
-
-
-def _derive_from_strokes(params: dict) -> dict:
-    return derive_from_strokes(
-        params["path"],
-        int(params["image_width"]),
-        int(params["image_height"]),
-        params.get("outer_strokes") or [],
-        params.get("inner_strokes") or [],
-    )
 
 
 def _export_corrected(params: dict) -> dict:
@@ -54,8 +38,6 @@ def _export_corrected(params: dict) -> dict:
 
 HANDLERS = {
     "image_meta": _image_meta,
-    "detect_outer_rect": _detect_outer_rect,
-    "derive_from_strokes": _derive_from_strokes,
     "export_corrected": _export_corrected,
 }
 

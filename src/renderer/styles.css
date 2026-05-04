@@ -111,46 +111,15 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .row label { color: #aaa; }
 
-.fit-diagnostics {
-  margin-top: 10px;
-  border-left: 2px solid var(--fit-color);
-  padding-left: 8px;
-}
-
-.fit-diagnostics + .fit-diagnostics {
-  margin-top: 12px;
-}
-
-.fit-diagnostics-title {
-  margin-bottom: 5px;
-  color: #ccc;
-  font-weight: 600;
-}
-
-.fit-row {
-  display: grid;
-  grid-template-columns: 42px 58px 48px 42px 56px;
+.path-actions {
+  display: flex;
   gap: 6px;
-  align-items: center;
-  margin: 3px 0;
-  color: #9a9a9a;
-  font-size: 11px;
+  margin-top: 10px;
 }
 
-.fit-row b {
-  font-weight: 600;
-}
-
-.fit-row-fit b {
-  color: #9ed39e;
-}
-
-.fit-row-weak b {
-  color: #e0c878;
-}
-
-.fit-row-fallback b {
-  color: #e58a8a;
+.path-actions button {
+  flex: 1;
+  padding-inline: 8px;
 }
 
 .statusbar {
