@@ -102,8 +102,9 @@ A saved set of manual outer/inner paths associated with one image. Profiles shou
    - Click a path segment to add a side node.
    - Drag side nodes.
    - Drag side-node handles.
-8. User saves manual paths for the image when desired.
-9. User exports corrected output.
+8. User projects a mesh inside the outer path to inspect the correction surface.
+9. User saves manual paths for the image when desired.
+10. User exports corrected output.
 
 ## Manual Pen Requirements
 
@@ -130,6 +131,16 @@ A saved set of manual outer/inner paths associated with one image. Profiles shou
 - Source image is never modified.
 - The current export does not yet use side nodes or the inner path for dewarping.
 - Side-node and inner-path data must still be preserved because they are required for future 3D-style dewarp.
+
+## Projected Mesh Requirements
+
+- User can toggle a projected mesh overlay after the outer path exists.
+- Mesh is projected inside the outer boundary.
+- Mesh boundary follows the outer path, including side nodes and handles.
+- Mesh updates live as nodes and handles move.
+- Mesh density is adjustable.
+- Initial projection may use Coons-style interpolation from the four outer sides.
+- Later dewarp work should incorporate the inner path as an internal constraint.
 
 ## Future Dewarp Requirements
 
@@ -162,6 +173,7 @@ The future dewarp should assume paper bends smoothly. It should not introduce sh
   - New Outer
   - New Inner
   - Hide Handles
+  - Project Mesh
   - Fit
   - 100%
   - Export
@@ -169,6 +181,7 @@ The future dewarp should assume paper bends smoothly. It should not introduce sh
   - Active tool
   - Outer path node count or draft corner count
   - Inner path node count or draft corner count
+  - Mesh visibility and density controls
   - Clear controls
   - Basic usage instructions
 
@@ -185,6 +198,7 @@ The future dewarp should assume paper bends smoothly. It should not introduce sh
 
 - Export is perspective-only and uses outer corners only.
 - Side nodes and handles are visual/editable geometry but not yet used in export.
+- Projected mesh is currently a preview overlay, not yet used in export.
 - Corner handles are not exposed; corners remain sharp.
 - Side-node handles are symmetric only.
 - Deleting individual side nodes is not yet implemented.
@@ -199,3 +213,38 @@ The future dewarp should assume paper bends smoothly. It should not introduce sh
 5. Add curve sampling utilities for future dewarp.
 6. Add export preview that shows outer-corner perspective crop before writing.
 7. Begin mesh/dewarp implementation using both outer and inner manual paths.
+
+---
+
+next steps:
+i fixed the height manually. 
+
+does the mesh project from just the outside box? we want the mesh to be informed by both boxes - that's the core differentiator
+
+once that is set, next step will be to dewarp the image
+
+then export - which currently exports to the input folder, but shoulld go to a new folder (perhaps /output) whose content is ignroed by git but the folder is there
+
+we also want to reorganize the top bar
+from right to left:
+section 1
+open
+section 2
+Outer Pen
+Inner Pen
+Pan
+Reset (resets both rectangles)
+section 3
+Project mesh
+Dewarp (shows the crop and dewarping result)
+section 4
+Export (saves under same name in output folder with "corrected" appended to filename)
+Export As (gives user a file dialogue)
+
+move Fit and 100% to the right corner. add a disabled box that shows the current zoom level as well as the filename. fit, 100%, current zoom level, and filename all sit above the right panel. the remaining items (the sections/steps) sit above the main app window. all evenly distributed within their zone
+
+have the debug content always showing as a seperate section at the bottom of the right panel, rather than a popup you have to click
+
+default for "Inverse" text should actually be white, but the slider itself is red to match the app design
+
+move hide handles into the bar on the right with Clear Outer, Clear Inner. rename clear to Reset

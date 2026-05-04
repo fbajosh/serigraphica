@@ -16,6 +16,10 @@ const HANDLE_HIT_RADIUS = 10 // screen px
 const SEGMENT_HIT_RADIUS = 9 // screen px
 const CURVE_SAMPLE_STEPS = 36
 const DEFAULT_HANDLE_LENGTH = 60 // image px
+const MESH_CURVE_SAMPLE_STEPS = 18
+const INVERSE_MESH_COLOR = 'inverse'
+const INVERSE_FALLBACK_COLOR = '#4de8ff'
+const COLOR_SAMPLE_MAX_DIM = 720
 
 const COLORS: Record<Role, { stroke: string; fill: string; guide: string }> = {
   outer: { stroke: '#ff5e5e', fill: 'rgba(255, 94, 94, 0.08)', guide: 'rgba(255, 94, 94, 0.42)' },
@@ -34,6 +38,9 @@ type Props = {
   outerDraft: Point[]
   innerDraft: Point[]
   hideGuides: boolean
+  showMesh: boolean
+  meshDivisions: number
+  meshColor: string
   onAppendCorner: (role: Role, point: Point) => void
   onNodeChange: (role: Role, index: number, point: Point) => void
   onHandleChange: (role: Role, index: number, handle: Point) => void
@@ -129,6 +136,153 @@ function defaultNodeHandle(tangent: Point): Point {
   ]
 }
 
+function lerp(a: Point, b: Point, t: number): Point {
+  return [
+    a[0] * (1 - t) + b[0] * t,
+    a[1] * (1 - t) + b[1] * t
+  ]
+}
+
+function pathSegmentPoint(path: RectPath, index: number, t: number): Point {
+  const a = path.nodes[index]
+  const b = path.nodes[(index + 1) % path.nodes.length]
+  return cubicPoint(a.point, nodeOutHandle(a), nodeInHandle(b), b.point, t)
+}
+
+function sideSegmentIndices(path: RectPath, sideIndex: number): number[] {
+  const start = path.cornerIndices[sideIndex]
+  const end = path.cornerIndices[(sideIndex + 1) % 4]
+  const out: number[] = []
+  let index = start
+  for (let guard = 0; guard < path.nodes.length; guard++) {
+    out.push(index)
+    index = (index + 1) % path.nodes.length
+    if (index === end) break
+  }
+  return out
+}
+
+function pointOnSide(path: RectPath, sideIndex: number, t: number): Point {
+  const segments = sideSegmentIndices(path, sideIndex)
+  if (segments.length === 0) return path.nodes[path.cornerIndices[sideIndex]].point
+  const samples: { point: Point; length: number }[] = []
+  let previous = pathSegmentPoint(path, segments[0], 0)
+  let total = 0
+  samples.push({ point: previous, length: 0 })
+  for (const segmentIndex of segments) {
+    for (let step = 1; step <= MESH_CURVE_SAMPLE_STEPS; step++) {
+      const point = pathSegmentPoint(path, segmentIndex, step / MESH_CURVE_SAMPLE_STEPS)
+      total += distance(previous, point)
+      samples.push({ point, length: total })
+      previous = point
+    }
+  }
+  if (total <= 1e-6) return samples[0].point
+  const target = total * Math.max(0, Math.min(1, t))
+  for (let i = 1; i < samples.length; i++) {
+    if (samples[i].length < target) continue
+    const prev = samples[i - 1]
+    const cur = samples[i]
+    const span = cur.length - prev.length
+    const localT = span <= 1e-6 ? 0 : (target - prev.length) / span
+    return lerp(prev.point, cur.point, localT)
+  }
+  return samples[samples.length - 1].point
+}
+
+function coonsPoint(path: RectPath, u: number, v: number): Point {
+  const tl = path.nodes[path.cornerIndices[0]].point
+  const tr = path.nodes[path.cornerIndices[1]].point
+  const br = path.nodes[path.cornerIndices[2]].point
+  const bl = path.nodes[path.cornerIndices[3]].point
+  const top = pointOnSide(path, 0, u)
+  const right = pointOnSide(path, 1, v)
+  const bottom = pointOnSide(path, 2, 1 - u)
+  const left = pointOnSide(path, 3, 1 - v)
+
+  const edgeBlend = add(lerp(top, bottom, v), lerp(left, right, u))
+  const cornerBlend = add(
+    add(mul(tl, (1 - u) * (1 - v)), mul(tr, u * (1 - v))),
+    add(mul(br, u * v), mul(bl, (1 - u) * v))
+  )
+  return sub(edgeBlend, cornerBlend)
+}
+
+function drawScaledPath(ctx: CanvasRenderingContext2D, path: RectPath, scale: number) {
+  const first = path.nodes[0]
+  ctx.beginPath()
+  ctx.moveTo(first.point[0] * scale, first.point[1] * scale)
+  for (let i = 0; i < path.nodes.length; i++) {
+    const a = path.nodes[i]
+    const b = path.nodes[(i + 1) % path.nodes.length]
+    const cp1 = nodeOutHandle(a)
+    const cp2 = nodeInHandle(b)
+    ctx.bezierCurveTo(
+      cp1[0] * scale,
+      cp1[1] * scale,
+      cp2[0] * scale,
+      cp2[1] * scale,
+      b.point[0] * scale,
+      b.point[1] * scale
+    )
+  }
+  ctx.closePath()
+}
+
+function pathCacheKey(path: RectPath): string {
+  return path.nodes
+    .map((node) => `${node.corner ? 'c' : 's'}:${node.point[0].toFixed(1)},${node.point[1].toFixed(1)},${node.handle[0].toFixed(1)},${node.handle[1].toFixed(1)}`)
+    .join('|')
+}
+
+function inverseInnerAverageColor(
+  img: HTMLImageElement,
+  innerPath: RectPath | null,
+  imageWidth: number,
+  imageHeight: number
+): string {
+  if (!innerPath || innerPath.nodes.length < 4) return INVERSE_FALLBACK_COLOR
+  const scale = Math.min(1, COLOR_SAMPLE_MAX_DIM / Math.max(imageWidth, imageHeight))
+  const width = Math.max(1, Math.round(imageWidth * scale))
+  const height = Math.max(1, Math.round(imageHeight * scale))
+  const imageCanvas = document.createElement('canvas')
+  imageCanvas.width = width
+  imageCanvas.height = height
+  const imageCtx = imageCanvas.getContext('2d', { willReadFrequently: true })
+  if (!imageCtx) return INVERSE_FALLBACK_COLOR
+  imageCtx.drawImage(img, 0, 0, width, height)
+
+  const maskCanvas = document.createElement('canvas')
+  maskCanvas.width = width
+  maskCanvas.height = height
+  const maskCtx = maskCanvas.getContext('2d', { willReadFrequently: true })
+  if (!maskCtx) return INVERSE_FALLBACK_COLOR
+  maskCtx.fillStyle = '#fff'
+  drawScaledPath(maskCtx, innerPath, scale)
+  maskCtx.fill()
+
+  try {
+    const imageData = imageCtx.getImageData(0, 0, width, height).data
+    const maskData = maskCtx.getImageData(0, 0, width, height).data
+    let r = 0
+    let g = 0
+    let b = 0
+    let weight = 0
+    for (let i = 0; i < imageData.length; i += 4) {
+      const alpha = maskData[i + 3] / 255
+      if (alpha <= 0) continue
+      r += imageData[i] * alpha
+      g += imageData[i + 1] * alpha
+      b += imageData[i + 2] * alpha
+      weight += alpha
+    }
+    if (weight <= 0) return INVERSE_FALLBACK_COLOR
+    return `rgb(${Math.round(255 - r / weight)}, ${Math.round(255 - g / weight)}, ${Math.round(255 - b / weight)})`
+  } catch {
+    return INVERSE_FALLBACK_COLOR
+  }
+}
+
 export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
   {
     src,
@@ -140,6 +294,9 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     outerDraft,
     innerDraft,
     hideGuides,
+    showMesh,
+    meshDivisions,
+    meshColor,
     onAppendCorner,
     onNodeChange,
     onHandleChange,
@@ -155,11 +312,12 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
   const hoverSegmentRef = useRef<HoverSegment>(null)
   const drawScheduledRef = useRef(false)
   const drawRef = useRef<() => void>(() => {})
+  const inverseColorRef = useRef<{ key: string; color: string } | null>(null)
   const [containerSize, setContainerSize] = useState({ w: 0, h: 0 })
   const [imageReady, setImageReady] = useState(false)
 
-  const propsRef = useRef({ tool, outerPath, innerPath, outerDraft, innerDraft, hideGuides })
-  propsRef.current = { tool, outerPath, innerPath, outerDraft, innerDraft, hideGuides }
+  const propsRef = useRef({ tool, outerPath, innerPath, outerDraft, innerDraft, hideGuides, showMesh, meshDivisions, meshColor })
+  propsRef.current = { tool, outerPath, innerPath, outerDraft, innerDraft, hideGuides, showMesh, meshDivisions, meshColor }
 
   useLayoutEffect(() => {
     const el = containerRef.current
@@ -325,6 +483,53 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     [hideGuides, imageToScreen]
   )
 
+  const drawProjectedMesh = useCallback((ctx: CanvasRenderingContext2D, path: RectPath, divisions: number, color: string) => {
+    const safeDivisions = Math.max(2, Math.min(40, Math.round(divisions)))
+    ctx.save()
+    ctx.lineWidth = 1
+    ctx.globalAlpha = 0.72
+    ctx.strokeStyle = color
+    ctx.setLineDash([5, 5])
+
+    const drawMeshLine = (points: Point[]) => {
+      ctx.beginPath()
+      points.forEach((point, index) => {
+        const [sx, sy] = imageToScreen(point[0], point[1])
+        if (index === 0) ctx.moveTo(sx, sy)
+        else ctx.lineTo(sx, sy)
+      })
+      ctx.stroke()
+    }
+
+    for (let x = 0; x <= safeDivisions; x++) {
+      const u = x / safeDivisions
+      const points: Point[] = []
+      for (let y = 0; y <= safeDivisions; y++) {
+        points.push(coonsPoint(path, u, y / safeDivisions))
+      }
+      drawMeshLine(points)
+    }
+    for (let y = 0; y <= safeDivisions; y++) {
+      const v = y / safeDivisions
+      const points: Point[] = []
+      for (let x = 0; x <= safeDivisions; x++) {
+        points.push(coonsPoint(path, x / safeDivisions, v))
+      }
+      drawMeshLine(points)
+    }
+    ctx.setLineDash([])
+    ctx.globalAlpha = 0.95
+    ctx.strokeStyle = color
+    ctx.lineWidth = 1.5
+    const center = coonsPoint(path, 0.5, 0.5)
+    const [cx, cy] = imageToScreen(center[0], center[1])
+    ctx.beginPath()
+    ctx.arc(cx, cy, 3, 0, Math.PI * 2)
+    ctx.fillStyle = color
+    ctx.fill()
+    ctx.restore()
+  }, [imageToScreen])
+
   const drawDraft = useCallback((ctx: CanvasRenderingContext2D, points: Point[], role: Role) => {
     if (points.length === 0) return
     const color = COLORS[role]
@@ -388,8 +593,31 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       ctx.drawImage(img, tx, ty, imageWidth * scale, imageHeight * scale)
     }
 
-    const { tool: curTool, outerPath: op, innerPath: ip, outerDraft: od, innerDraft: id } = propsRef.current
+    const {
+      tool: curTool,
+      outerPath: op,
+      innerPath: ip,
+      outerDraft: od,
+      innerDraft: id,
+      showMesh: meshVisible,
+      meshDivisions: curMeshDivisions,
+      meshColor: curMeshColor
+    } = propsRef.current
     const activeRole = roleFromTool(curTool)
+    if (op && meshVisible) {
+      let effectiveMeshColor = curMeshColor
+      if (curMeshColor === INVERSE_MESH_COLOR && img) {
+        const key = `${src}|${imageWidth}x${imageHeight}|${ip ? pathCacheKey(ip) : 'no-inner'}`
+        if (inverseColorRef.current?.key !== key) {
+          inverseColorRef.current = {
+            key,
+            color: inverseInnerAverageColor(img, ip, imageWidth, imageHeight)
+          }
+        }
+        effectiveMeshColor = inverseColorRef.current.color
+      }
+      drawProjectedMesh(ctx, op, curMeshDivisions, effectiveMeshColor)
+    }
     if (op) drawPath(ctx, op, 'outer', activeRole, 1)
     if (ip) drawPath(ctx, ip, 'inner', activeRole, 1)
     drawDraft(ctx, od, 'outer')
@@ -420,12 +648,12 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       ctx.stroke()
       ctx.restore()
     }
-  }, [containerSize, drawDraft, drawPath, imageHeight, imageToScreen, imageWidth])
+  }, [containerSize, drawDraft, drawPath, drawProjectedMesh, imageHeight, imageToScreen, imageWidth])
   drawRef.current = draw
 
   useEffect(() => {
     requestDraw()
-  }, [containerSize, imageReady, outerPath, innerPath, outerDraft, innerDraft, tool, hideGuides, requestDraw])
+  }, [containerSize, imageReady, outerPath, innerPath, outerDraft, innerDraft, tool, hideGuides, showMesh, meshDivisions, meshColor, requestDraw])
 
   const findSegmentHit = useCallback((role: Role, screenPoint: Point): HoverSegment => {
     const path = pathForRole(role)

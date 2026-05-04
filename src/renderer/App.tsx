@@ -12,6 +12,9 @@ type Loaded = {
 type DraftState = { outer: Point[]; inner: Point[] }
 
 const DEBUG_OUTLINES_KEY = 'serigraphica.manualOutlines.v2'
+const DEFAULT_ACCENT_COLOR = '#ff5e5e'
+const MESH_COLORS = ['inverse', '#ffffff', '#ff4d4d', '#ffd84d', '#5ee05e', '#4de8ff', '#4d79ff', '#ff5cff', '#000000'] as const
+const MESH_COLOR_LABELS = ['Inverse', 'White', 'Red', 'Yellow', 'Green', 'Cyan', 'Blue', 'Magenta', 'Black'] as const
 
 type SavedManualOutline = {
   version: 2
@@ -128,6 +131,9 @@ export function App() {
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState('Open an image to begin')
   const [hideGuides, setHideGuides] = useState(false)
+  const [showMesh, setShowMesh] = useState(false)
+  const [meshDivisions, setMeshDivisions] = useState(10)
+  const [meshColorIndex, setMeshColorIndex] = useState(0)
   const [dragActive, setDragActive] = useState(false)
   const [debugOpen, setDebugOpen] = useState(false)
   const [debugMessage, setDebugMessage] = useState('')
@@ -145,6 +151,8 @@ export function App() {
     setInnerPath(null)
     setDrafts({ outer: [], inner: [] })
     setTool('pen-outer')
+    setShowMesh(false)
+    setMeshColorIndex(0)
     setDebugMessage('')
     refreshSavedDebugOutline(imageFilename(res.path))
     setStatus('Outer Pen: click four outer corners in order around the paper')
@@ -267,6 +275,18 @@ export function App() {
     }
   }, [image, outerPath])
 
+  const handleProjectMesh = useCallback(() => {
+    if (!outerPath) {
+      setStatus('Create the outer path before projecting the mesh')
+      return
+    }
+    setShowMesh((visible) => {
+      const next = !visible
+      setStatus(next ? 'Projected mesh inside the outer path' : 'Mesh hidden')
+      return next
+    })
+  }, [outerPath])
+
   const handleSaveDebugOutlines = useCallback(() => {
     if (!image) return
     const targetFilename = imageFilename(image.path)
@@ -363,6 +383,8 @@ export function App() {
 
   const outerCorners = pathCorners(outerPath)
   const hasAnyPath = Boolean(outerPath || innerPath || drafts.outer.length || drafts.inner.length)
+  const meshSliderColor = MESH_COLORS[meshColorIndex] === 'inverse' ? DEFAULT_ACCENT_COLOR : MESH_COLORS[meshColorIndex]
+  const meshColorPercent = `${(meshColorIndex / (MESH_COLORS.length - 1)) * 100}%`
 
   return (
     <div className="app">
@@ -378,6 +400,9 @@ export function App() {
         <span className="sep" />
         <ToolButton active={hideGuides} onClick={() => setHideGuides((hidden) => !hidden)} title="Hide node handles">
           Hide Handles
+        </ToolButton>
+        <ToolButton active={showMesh} onClick={handleProjectMesh} title="Project mesh inside the outer path">
+          Project Mesh
         </ToolButton>
         <span className="sep" />
         <button onClick={() => canvasRef.current?.fitToView()} disabled={!image}>Fit</button>
@@ -419,6 +444,9 @@ export function App() {
             outerDraft={drafts.outer}
             innerDraft={drafts.inner}
             hideGuides={hideGuides}
+            showMesh={showMesh}
+            meshDivisions={meshDivisions}
+            meshColor={MESH_COLORS[meshColorIndex]}
             onAppendCorner={handleAppendCorner}
             onNodeChange={handleNodeChange}
             onHandleChange={handleHandleChange}
@@ -445,6 +473,47 @@ export function App() {
           <div className="path-actions">
             <button onClick={() => handleClearPath('outer')} disabled={!outerPath && drafts.outer.length === 0}>Clear Outer</button>
             <button onClick={() => handleClearPath('inner')} disabled={!innerPath && drafts.inner.length === 0}>Clear Inner</button>
+          </div>
+        </section>
+        <section>
+          <h3>Projected mesh</h3>
+          <div className="row">
+            <label>State</label>
+            <span style={{ color: showMesh ? '#88ffcd' : '#666' }}>{showMesh ? 'visible' : 'hidden'}</span>
+          </div>
+          <div className="row">
+            <label>Density</label>
+            <span>{meshDivisions}x{meshDivisions}</span>
+          </div>
+          <input
+            type="range"
+            min={4}
+            max={24}
+            value={meshDivisions}
+            onChange={(e) => setMeshDivisions(Number(e.target.value))}
+            style={{ width: '100%' }}
+          />
+          <div className="row" style={{ marginTop: 10 }}>
+            <label>Color</label>
+            <span style={{ color: meshSliderColor }}>
+              {MESH_COLOR_LABELS[meshColorIndex]}
+            </span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={MESH_COLORS.length - 1}
+            step={1}
+            value={meshColorIndex}
+            onChange={(e) => setMeshColorIndex(Number(e.target.value))}
+            className="color-slider"
+            style={{
+              '--slider-color': meshSliderColor,
+              '--slider-fill': meshColorPercent
+            } as React.CSSProperties & Record<'--slider-color' | '--slider-fill', string>}
+          />
+          <div style={{ color: '#888', fontSize: 11, marginTop: 6 }}>
+            Mesh is projected from the curved outer boundary. It updates live as nodes and handles move.
           </div>
         </section>
         <section>
