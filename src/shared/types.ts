@@ -25,6 +25,14 @@ export type ExportResult = {
   outputHeight: number
 }
 
+export type DewarpOperation = 'preview' | 'export' | 'export-as'
+
+export type DewarpProgress = {
+  percent: number
+  stage: string
+  operation: DewarpOperation
+}
+
 export type LoadedImage = {
   path: string
   width: number
@@ -51,6 +59,22 @@ export type SerigraphicaAPI = {
     corners: Quad,
     quality: number
   ) => Promise<LoadedImage>
+  exportDewarped: (
+    imagePath: string,
+    rectangles: RectPath[],
+    quality: number
+  ) => Promise<ExportResult>
+  exportDewarpedAs: (
+    imagePath: string,
+    rectangles: RectPath[],
+    quality: number
+  ) => Promise<ExportResult | null>
+  previewDewarped: (
+    imagePath: string,
+    rectangles: RectPath[],
+    quality: number
+  ) => Promise<LoadedImage>
+  onDewarpProgress: (callback: (progress: DewarpProgress) => void) => () => void
 }
 
 declare global {

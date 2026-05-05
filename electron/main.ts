@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, protocol, net } from 'electron'
+import type { IpcMainInvokeEvent } from 'electron'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join, basename, extname } from 'node:path'
 import { existsSync, mkdirSync } from 'node:fs'
@@ -15,7 +16,15 @@ const outputDir = join(projectRoot, 'output')
 type PendingCall = {
   resolve: (value: unknown) => void
   reject: (err: Error) => void
+  onProgress?: (progress: DewarpProgress) => void
 }
+
+type DewarpProgress = {
+  percent: number
+  stage: string
+}
+
+type DewarpOperation = 'preview' | 'export' | 'export-as'
 
 class Sidecar {
   private proc: ChildProcessWithoutNullStreams | null = null
@@ -54,9 +63,13 @@ class Sidecar {
       this.buffer = this.buffer.slice(idx + 1)
       if (!line) continue
       try {
-        const msg = JSON.parse(line) as { id: number; result?: unknown; error?: string }
+        const msg = JSON.parse(line) as { id: number; result?: unknown; error?: string; progress?: DewarpProgress }
         const pending = this.pending.get(msg.id)
         if (!pending) continue
+        if (msg.progress) {
+          pending.onProgress?.(msg.progress)
+          continue
+        }
         this.pending.delete(msg.id)
         if (msg.error) pending.reject(new Error(msg.error))
         else pending.resolve(msg.result)
@@ -66,13 +79,13 @@ class Sidecar {
     }
   }
 
-  call<T>(method: string, params: unknown): Promise<T> {
+  call<T>(method: string, params: unknown, onProgress?: (progress: DewarpProgress) => void): Promise<T> {
     if (!this.proc) this.start()
     if (!this.proc) throw new Error('sidecar failed to start')
     const id = this.nextId++
     const payload = JSON.stringify({ id, method, params }) + '\n'
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject })
+      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, onProgress })
       this.proc!.stdin.write(payload, (err) => {
         if (err) {
           this.pending.delete(id)
@@ -179,6 +192,30 @@ async function exportCorrectedTo(imagePath: string, corners: number[][], quality
   })
 }
 
+function dewarpProgressSender(evt: IpcMainInvokeEvent, operation: DewarpOperation) {
+  return (progress: DewarpProgress) => {
+    evt.sender.send('dewarp-progress', {
+      ...progress,
+      operation
+    })
+  }
+}
+
+async function exportDewarpedTo(
+  imagePath: string,
+  rectangles: unknown[],
+  quality: number,
+  outputPath: string,
+  onProgress?: (progress: DewarpProgress) => void
+) {
+  return sidecar.call('export_dewarped', {
+    path: imagePath,
+    rectangles,
+    output_path: outputPath,
+    quality
+  }, onProgress)
+}
+
 ipcMain.handle('open-image', async () => {
   const result = await dialog.showOpenDialog({
     title: 'Open image',
@@ -209,9 +246,39 @@ ipcMain.handle('export-corrected-as', async (_evt, imagePath: string, corners: n
   return exportCorrectedTo(imagePath, corners, quality, result.filePath)
 })
 
+ipcMain.handle('export-dewarped', async (evt, imagePath: string, rectangles: unknown[], quality: number) => {
+  return exportDewarpedTo(imagePath, rectangles, quality, correctedOutputPath(imagePath), dewarpProgressSender(evt, 'export'))
+})
+
+ipcMain.handle('export-dewarped-as', async (evt, imagePath: string, rectangles: unknown[], quality: number) => {
+  const base = basename(imagePath, extname(imagePath))
+  mkdirSync(outputDir, { recursive: true })
+  const result = await dialog.showSaveDialog({
+    title: 'Export dewarped image',
+    defaultPath: join(outputDir, `${base}_corrected.jpg`),
+    filters: [{ name: 'JPEG', extensions: ['jpg', 'jpeg'] }]
+  })
+  if (result.canceled || !result.filePath) return null
+  return exportDewarpedTo(imagePath, rectangles, quality, result.filePath, dewarpProgressSender(evt, 'export-as'))
+})
+
 ipcMain.handle('preview-corrected', async (_evt, imagePath: string, corners: number[][], quality: number) => {
   const outputPath = previewOutputPath(imagePath)
   const result = await exportCorrectedTo(imagePath, corners, quality, outputPath) as {
+    outputWidth: number
+    outputHeight: number
+  }
+  return {
+    path: outputPath,
+    width: result.outputWidth,
+    height: result.outputHeight,
+    dataUrl: `local-image://localhost${outputPath}?t=${Date.now()}`
+  }
+})
+
+ipcMain.handle('preview-dewarped', async (evt, imagePath: string, rectangles: unknown[], quality: number) => {
+  const outputPath = previewOutputPath(imagePath)
+  const result = await exportDewarpedTo(imagePath, rectangles, quality, outputPath, dewarpProgressSender(evt, 'preview')) as {
     outputWidth: number
     outputHeight: number
   }

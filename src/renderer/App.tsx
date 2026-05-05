@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react'
 import { Canvas, CanvasHandle } from './components/Canvas'
-import type { BezierNode, Point, Quad, RectPath, Tool } from '../shared/types'
+import type { BezierNode, DewarpProgress, Point, Quad, RectPath, Tool } from '../shared/types'
 
 type Loaded = {
   path: string
@@ -191,6 +191,7 @@ export function App() {
   const [meshColorIndex, setMeshColorIndex] = useState(0)
   const [zoomLevel, setZoomLevel] = useState(1)
   const [dewarpPreview, setDewarpPreview] = useState<Loaded | null>(null)
+  const [dewarpProgress, setDewarpProgress] = useState<DewarpProgress | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const [debugMessage, setDebugMessage] = useState('')
   const [savedDebugOutline, setSavedDebugOutline] = useState<SavedManualOutlineMeta | null>(null)
@@ -331,44 +332,36 @@ export function App() {
     setStatus('Rectangle node deleted')
   }, [rectangles, setRectangleAt])
 
-  const outerCornersOrStatus = useCallback((): Quad | null => {
-    const { outerPath } = deriveRectangles(rectangles)
-    if (!outerPath) {
-      setStatus('Create at least one rectangle first')
-      return null
-    }
-    const corners = pathCorners(outerPath)
-    if (!corners) {
-      setStatus('Derived outer rectangle does not have four corner nodes')
-      return null
-    }
-    return corners
-  }, [rectangles])
-
   const handleExport = useCallback(async () => {
     if (!image) return
-    const corners = outerCornersOrStatus()
-    if (!corners) return
+    if (rectangles.length === 0) {
+      setStatus('Create at least one rectangle first')
+      return
+    }
     setBusy(true)
-    setStatus('Exporting...')
+    setDewarpProgress(null)
+    setStatus(rectangles.length >= 2 ? 'Exporting dewarped image...' : 'Exporting perspective image...')
     try {
-      const out = await window.serigraphica.exportCorrected(image.path, corners, 92)
+      const out = await window.serigraphica.exportDewarped(image.path, rectangles, 92)
       setStatus(`Exported ${out.outputWidth}x${out.outputHeight} -> ${out.outputPath}`)
     } catch (err) {
       setStatus(`Error: ${(err as Error).message}`)
     } finally {
       setBusy(false)
     }
-  }, [image, outerCornersOrStatus])
+  }, [image, rectangles])
 
   const handleExportAs = useCallback(async () => {
     if (!image) return
-    const corners = outerCornersOrStatus()
-    if (!corners) return
+    if (rectangles.length === 0) {
+      setStatus('Create at least one rectangle first')
+      return
+    }
     setBusy(true)
-    setStatus('Exporting...')
+    setDewarpProgress(null)
+    setStatus(rectangles.length >= 2 ? 'Exporting dewarped image...' : 'Exporting perspective image...')
     try {
-      const out = await window.serigraphica.exportCorrectedAs(image.path, corners, 92)
+      const out = await window.serigraphica.exportDewarpedAs(image.path, rectangles, 92)
       if (!out) {
         setStatus('Export cancelled')
         return
@@ -379,29 +372,34 @@ export function App() {
     } finally {
       setBusy(false)
     }
-  }, [image, outerCornersOrStatus])
+  }, [image, rectangles])
 
   const handleDewarp = useCallback(async () => {
     if (!image) return
     if (dewarpPreview) {
       setDewarpPreview(null)
+      setDewarpProgress(null)
       setStatus('Returned to original image')
       return
     }
-    const corners = outerCornersOrStatus()
-    if (!corners) return
+    if (rectangles.length < 2) {
+      setStatus('Create at least two rectangles for mesh dewarp')
+      return
+    }
     setBusy(true)
+    setDewarpProgress({ percent: 0, stage: 'Starting', operation: 'preview' })
     setStatus('Generating dewarp preview...')
     try {
-      const preview = await window.serigraphica.previewCorrected(image.path, corners, 92)
+      const preview = await window.serigraphica.previewDewarped(image.path, rectangles, 92)
       setDewarpPreview(preview)
       setStatus(`Dewarp preview ${preview.width}x${preview.height}`)
     } catch (err) {
       setStatus(`Error: ${(err as Error).message}`)
     } finally {
+      setDewarpProgress(null)
       setBusy(false)
     }
-  }, [dewarpPreview, image, outerCornersOrStatus])
+  }, [dewarpPreview, image, rectangles])
 
   const handleProjectMesh = useCallback(() => {
     if (rectangles.length < 2) {
@@ -489,6 +487,13 @@ export function App() {
   }, [image, refreshSavedDebugOutline])
 
   useEffect(() => {
+    return window.serigraphica.onDewarpProgress((progress) => {
+      if (progress.operation !== 'preview') return
+      setDewarpProgress(progress)
+    })
+  }, [])
+
+  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!image) return
       if (e.target instanceof HTMLElement && ['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return
@@ -518,6 +523,9 @@ export function App() {
   const meshSliderColor = MESH_COLORS[meshColorIndex] === 'inverse' ? DEFAULT_ACCENT_COLOR : MESH_COLORS[meshColorIndex]
   const meshLabelColor = MESH_COLORS[meshColorIndex] === 'inverse' ? '#fff' : meshSliderColor
   const meshColorPercent = `${(meshColorIndex / (MESH_COLORS.length - 1)) * 100}%`
+  const dewarpButtonLabel = dewarpProgress
+    ? `Dewarping...${Math.round(Math.max(0, Math.min(100, dewarpProgress.percent)))}%`
+    : 'Dewarp'
 
   return (
     <div className="app">
@@ -527,19 +535,19 @@ export function App() {
         </div>
         <span className="sep" />
         <div className="toolbar-group">
-          <ToolButton active={tool === 'pen-rectangle'} onClick={handleAddRectangle} disabled={!image} title="Add rectangle (A)" color="#4ea1ff">
-            Add Rectangle
+          <ToolButton active={tool === 'pen-rectangle'} onClick={handleAddRectangle} disabled={!image} title="Add rectangle (A)">
+            Add
           </ToolButton>
           <ToolButton active={tool === 'pan'} onClick={() => setTool('pan')} title="Pan/move (V)">Pan</ToolButton>
-          <button onClick={handleResetAll} disabled={!hasAnyPath}>Reset All</button>
+          <button onClick={handleResetAll} disabled={!hasAnyPath}>Reset</button>
         </div>
         <span className="sep" />
         <div className="toolbar-group">
           <ToolButton active={showMesh} onClick={handleProjectMesh} title="Project mesh using both rectangles">
             Mesh
           </ToolButton>
-          <ToolButton active={dewarpActive} onClick={handleDewarp} disabled={busy || !image || !outerCorners} title="Toggle dewarp preview">
-            Dewarp
+          <ToolButton active={dewarpActive} onClick={handleDewarp} disabled={busy || !image || rectangles.length < 2} title="Toggle dewarp preview" className="dewarp-button">
+            {dewarpButtonLabel}
           </ToolButton>
         </div>
         <span className="sep" />
@@ -688,7 +696,7 @@ export function App() {
           </div>
         </section>
         <section className="debug-section">
-          <h3>Debug paths</h3>
+          <h3>File info</h3>
           <div className="debug-row">
             <span>Filename</span>
             <b>{filename || 'No image'}</b>
@@ -734,6 +742,7 @@ export function App() {
 function ToolButton({
   active,
   color,
+  className,
   disabled = false,
   onClick,
   title,
@@ -741,6 +750,7 @@ function ToolButton({
 }: {
   active: boolean
   color?: string
+  className?: string
   disabled?: boolean
   onClick: () => void
   title: string
@@ -748,6 +758,7 @@ function ToolButton({
 }) {
   return (
     <button
+      className={className}
       disabled={disabled}
       onClick={onClick}
       title={title}

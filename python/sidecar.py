@@ -12,10 +12,14 @@ from __future__ import annotations
 import json
 import sys
 import traceback
+from collections.abc import Callable
 
 import cv2
 
-from transform import export_corrected
+from transform import export_corrected, export_dewarped
+
+
+ProgressCallback = Callable[[float, str], None]
 
 
 def _image_meta(params: dict) -> dict:
@@ -36,9 +40,20 @@ def _export_corrected(params: dict) -> dict:
     )
 
 
+def _export_dewarped(params: dict, progress: ProgressCallback | None = None) -> dict:
+    return export_dewarped(
+        params["path"],
+        params["rectangles"],
+        params["output_path"],
+        int(params.get("quality", 92)),
+        progress,
+    )
+
+
 HANDLERS = {
     "image_meta": _image_meta,
     "export_corrected": _export_corrected,
+    "export_dewarped": _export_dewarped,
 }
 
 
@@ -62,8 +77,17 @@ def main() -> int:
             sys.stdout.write(json.dumps({"id": rid, "error": f"unknown method: {method}"}) + "\n")
             sys.stdout.flush()
             continue
+        def progress(percent: float, stage: str) -> None:
+            sys.stdout.write(json.dumps({
+                "id": rid,
+                "progress": {
+                    "percent": percent,
+                    "stage": stage,
+                },
+            }) + "\n")
+            sys.stdout.flush()
         try:
-            result = handler(params)
+            result = _export_dewarped(params, progress) if method == "export_dewarped" else handler(params)
             sys.stdout.write(json.dumps({"id": rid, "result": result}) + "\n")
         except Exception as e:
             sys.stderr.write(f"[sidecar] error in {method}: {e}\n{traceback.format_exc()}")

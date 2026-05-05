@@ -70,6 +70,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   gap: 8px;
 }
 
+.dewarp-button {
+  min-width: 142px;
+}
+
 .main-toolbar button,
 .main-toolbar input,
 .view-toolbar button,

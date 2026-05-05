@@ -22,6 +22,7 @@ const TPS_SMOOTHING = 0.012
 const OUTER_MESH_WEIGHT = 1.8
 const INNER_MESH_WEIGHT = 0.28
 const OUTER_PRIOR_WEIGHT = 0.08
+const PARALLEL_RAIL_WEIGHT = 0.14
 const INVERSE_MESH_COLOR = 'inverse'
 const INVERSE_FALLBACK_COLOR = '#4de8ff'
 const COLOR_SAMPLE_MAX_DIM = 720
@@ -317,14 +318,6 @@ function affineParamForOuter(outerPath: RectPath, point: Point): Point {
   ]
 }
 
-function pathCenter(path: RectPath): Point {
-  const corners = [0, 1, 2, 3].map((index) => pathCornerPoint(path, index))
-  return [
-    corners.reduce((sum, point) => sum + point[0], 0) / corners.length,
-    corners.reduce((sum, point) => sum + point[1], 0) / corners.length
-  ]
-}
-
 function meshLayoutForPaths(outerPath: RectPath, innerPaths: RectPath[]): MeshLayout {
   const outerBoundaries = pathBoundaries(outerPath)
   const width = Math.max(1, (boundaryLength(outerBoundaries.top) + boundaryLength(outerBoundaries.bottom)) / 2)
@@ -332,19 +325,25 @@ function meshLayoutForPaths(outerPath: RectPath, innerPaths: RectPath[]): MeshLa
   const minGap = Math.max(8, Math.min(width, height) * 0.025)
   const innerRects = innerPaths.map((path) => {
     const boundaries = pathBoundaries(path)
-    const innerWidth = Math.min(width - minGap * 2, Math.max(1, (boundaryLength(boundaries.top) + boundaryLength(boundaries.bottom)) / 2))
-    const innerHeight = Math.min(height - minGap * 2, Math.max(1, (boundaryLength(boundaries.left) + boundaryLength(boundaries.right)) / 2))
-    const [u, v] = affineParamForOuter(outerPath, pathCenter(path))
-    const cx = width * u
-    const cy = height * v
-    const x0 = Math.max(minGap, Math.min(width - minGap - innerWidth, cx - innerWidth / 2))
-    const y0 = Math.max(minGap, Math.min(height - minGap - innerHeight, cy - innerHeight / 2))
+    const measuredWidth = Math.max(1, (boundaryLength(boundaries.top) + boundaryLength(boundaries.bottom)) / 2)
+    const measuredHeight = Math.max(1, (boundaryLength(boundaries.left) + boundaryLength(boundaries.right)) / 2)
+    const params = [0, 1, 2, 3].map((index) => affineParamForOuter(outerPath, pathCornerPoint(path, index)))
+    const leftU = (params[0][0] + params[3][0]) / 2
+    const rightU = (params[1][0] + params[2][0]) / 2
+    const topV = (params[0][1] + params[1][1]) / 2
+    const bottomV = (params[2][1] + params[3][1]) / 2
+    const targetWidth = Math.min(width - minGap * 2, Math.max(minGap, Math.abs(rightU - leftU) * width, measuredWidth * 0.35))
+    const targetHeight = Math.min(height - minGap * 2, Math.max(minGap, Math.abs(bottomV - topV) * height, measuredHeight * 0.35))
+    const cx = width * ((leftU + rightU) / 2)
+    const cy = height * ((topV + bottomV) / 2)
+    const x0 = Math.max(minGap, Math.min(width - minGap - targetWidth, cx - targetWidth / 2))
+    const y0 = Math.max(minGap, Math.min(height - minGap - targetHeight, cy - targetHeight / 2))
     return {
       path,
       x0,
-      x1: x0 + innerWidth,
+      x1: x0 + targetWidth,
       y0,
-      y1: y0 + innerHeight
+      y1: y0 + targetHeight
     }
   })
   return { width, height, innerRects }
@@ -755,6 +754,31 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
         addConstraint([innerRect.x1, innerRect.y0 + (innerRect.y1 - innerRect.y0) * t], boundaries.right(t), INNER_MESH_WEIGHT)
         addConstraint([innerRect.x0 + (innerRect.x1 - innerRect.x0) * t, innerRect.y1], boundaries.bottom(t), INNER_MESH_WEIGHT)
         addConstraint([innerRect.x0, innerRect.y0 + (innerRect.y1 - innerRect.y0) * t], boundaries.left(t), INNER_MESH_WEIGHT)
+
+        const innerX = innerRect.x0 + (innerRect.x1 - innerRect.x0) * t
+        const innerY = innerRect.y0 + (innerRect.y1 - innerRect.y0) * t
+        for (const railT of [1 / 3, 2 / 3]) {
+          addConstraint(
+            [innerX, innerRect.y0 * railT],
+            lerp(outerBoundaries.top(innerX / layout.width), boundaries.top(t), railT),
+            PARALLEL_RAIL_WEIGHT
+          )
+          addConstraint(
+            [innerX, innerRect.y1 + (layout.height - innerRect.y1) * railT],
+            lerp(boundaries.bottom(t), outerBoundaries.bottom(innerX / layout.width), railT),
+            PARALLEL_RAIL_WEIGHT
+          )
+          addConstraint(
+            [innerRect.x0 * railT, innerY],
+            lerp(outerBoundaries.left(innerY / layout.height), boundaries.left(t), railT),
+            PARALLEL_RAIL_WEIGHT
+          )
+          addConstraint(
+            [innerRect.x1 + (layout.width - innerRect.x1) * railT, innerY],
+            lerp(boundaries.right(t), outerBoundaries.right(innerY / layout.height), railT),
+            PARALLEL_RAIL_WEIGHT
+          )
+        }
       }
     }
     for (let y = 1; y < 5; y++) {
