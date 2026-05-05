@@ -226,3 +226,8 @@ The future dewarp should assume paper bends smoothly. It should not introduce sh
 5. Add curve sampling utilities for future dewarp.
 6. Replace perspective-only dewarp preview/export with mesh-based resampling using both paths.
 7. Add crop/result comparison controls for dewarp review.
+
+
+Next:
+1. Have dewarp button dynamically go between two widths: 1 "Dewarp" and 2 "Dewarping...NN%"
+2. swap Pan and Reset

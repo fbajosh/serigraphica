@@ -406,12 +406,19 @@ export function App() {
       setStatus('Create at least two rectangles before projecting the mesh')
       return
     }
+    if (dewarpPreview) {
+      setDewarpPreview(null)
+      setDewarpProgress(null)
+      setShowMesh(true)
+      setStatus('Returned to projected mesh')
+      return
+    }
     setShowMesh((visible) => {
       const next = !visible
       setStatus(next ? 'Projected mesh using all rectangles' : 'Mesh hidden')
       return next
     })
-  }, [rectangles.length])
+  }, [dewarpPreview, rectangles.length])
 
   const handleSaveDebugOutlines = useCallback(() => {
     if (!image) return
@@ -455,7 +462,7 @@ export function App() {
     const sizeWarning = saved.imageWidth !== image.width || saved.imageHeight !== image.height
       ? ' Dimensions differ from the open image.'
       : ''
-    const message = `Loaded manual paths for ${targetFilename}.${sizeWarning}`
+    const message = `Paths loaded.${sizeWarning}`
     setDebugMessage(message)
     setStatus(message)
   }, [image, refreshSavedDebugOutline])
@@ -524,8 +531,8 @@ export function App() {
   const meshLabelColor = MESH_COLORS[meshColorIndex] === 'inverse' ? '#fff' : meshSliderColor
   const meshColorPercent = `${(meshColorIndex / (MESH_COLORS.length - 1)) * 100}%`
   const dewarpButtonLabel = dewarpProgress
-    ? `Dewarping...${Math.round(Math.max(0, Math.min(100, dewarpProgress.percent)))}%`
-    : 'Dewarp'
+    ? `Dewarping (${Math.round(Math.max(0, Math.min(100, dewarpProgress.percent)))}%)`
+    : 'Dewarp Image'
 
   return (
     <div className="app">
@@ -538,13 +545,14 @@ export function App() {
           <ToolButton active={tool === 'pen-rectangle'} onClick={handleAddRectangle} disabled={!image} title="Add rectangle (A)">
             Add
           </ToolButton>
-          <ToolButton active={tool === 'pan'} onClick={() => setTool('pan')} title="Pan/move (V)">Pan</ToolButton>
           <button onClick={handleResetAll} disabled={!hasAnyPath}>Reset</button>
+          <ToolButton active={tool === 'pan'} onClick={() => setTool('pan')} title="Pan/move (V)">Pan</ToolButton>
+          
         </div>
         <span className="sep" />
         <div className="toolbar-group">
           <ToolButton active={showMesh} onClick={handleProjectMesh} title="Project mesh using both rectangles">
-            Mesh
+            Generate Mesh
           </ToolButton>
           <ToolButton active={dewarpActive} onClick={handleDewarp} disabled={busy || !image || rectangles.length < 2} title="Toggle dewarp preview" className="dewarp-button">
             {dewarpButtonLabel}
@@ -558,10 +566,10 @@ export function App() {
       </div>
 
       <div className="view-toolbar">
+        <p>Zoom</p>
+        <span className="view-pill">{Math.round(zoomLevel * 100)}%</span>
         <button onClick={() => canvasRef.current?.fitToView()} disabled={!image}>Fit</button>
         <button onClick={() => canvasRef.current?.zoomToActualSize()} disabled={!image}>100%</button>
-        <span className="view-pill">{Math.round(zoomLevel * 100)}%</span>
-        <span className="view-pill filename-pill">{displayFilename || 'No file'}</span>
       </div>
 
       <div
@@ -684,16 +692,7 @@ export function App() {
               '--slider-fill': meshColorPercent
             } as React.CSSProperties & Record<'--slider-color' | '--slider-fill', string>}
           />
-          <div style={{ color: '#888', fontSize: 11, marginTop: 6 }}>
-            Mesh derives the largest rectangle as outer and uses every smaller rectangle as a smooth interior constraint.
-          </div>
-        </section>
-        <section>
-          <h3>Shortcuts</h3>
-          <div style={{ color: '#888', lineHeight: 1.5 }}>
-            A Add Rectangle, V or Space Pan. <br />
-            Cmd+0 fit, Cmd+1 100%.
-          </div>
+
         </section>
         <section className="debug-section">
           <h3>File info</h3>
