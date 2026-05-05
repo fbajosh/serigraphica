@@ -17,6 +17,7 @@ const SEGMENT_HIT_RADIUS = 9 // screen px
 const CURVE_SAMPLE_STEPS = 36
 const DEFAULT_HANDLE_LENGTH = 60 // image px
 const MESH_CURVE_SAMPLE_STEPS = 18
+const MESH_CONSTRAINT_STEPS = 8
 const INVERSE_MESH_COLOR = 'inverse'
 const INVERSE_FALLBACK_COLOR = '#4de8ff'
 const COLOR_SAMPLE_MAX_DIM = 720
@@ -41,6 +42,7 @@ type Props = {
   showMesh: boolean
   meshDivisions: number
   meshColor: string
+  onViewChange: (zoom: number) => void
   onAppendCorner: (role: Role, point: Point) => void
   onNodeChange: (role: Role, index: number, point: Point) => void
   onHandleChange: (role: Role, index: number, handle: Point) => void
@@ -61,8 +63,6 @@ type Drag =
   | null
 
 type HoverSegment = { role: Role; index: number; point: Point; tangent: Point } | null
-
-const ROLES: Role[] = ['outer', 'inner']
 
 function roleFromTool(tool: Tool): Role | null {
   if (tool === 'pen-outer') return 'outer'
@@ -208,6 +208,153 @@ function coonsPoint(path: RectPath, u: number, v: number): Point {
   return sub(edgeBlend, cornerBlend)
 }
 
+function pathCornerPoint(path: RectPath, index: number): Point {
+  return path.nodes[path.cornerIndices[index]].point
+}
+
+type Boundary = (t: number) => Point
+
+type MeshLayout = {
+  width: number
+  height: number
+  innerX0: number
+  innerX1: number
+  innerY0: number
+  innerY1: number
+}
+
+type TpsModel = {
+  targets: Point[]
+  xWeights: number[]
+  yWeights: number[]
+}
+
+function averageBoundaryDistance(a: Boundary, b: Boundary): number {
+  let total = 0
+  for (let i = 0; i <= MESH_CONSTRAINT_STEPS; i++) {
+    const t = i / MESH_CONSTRAINT_STEPS
+    total += distance(a(t), b(t))
+  }
+  return total / (MESH_CONSTRAINT_STEPS + 1)
+}
+
+function boundaryLength(boundary: Boundary): number {
+  let total = 0
+  let previous = boundary(0)
+  for (let i = 1; i <= MESH_CONSTRAINT_STEPS * 3; i++) {
+    const point = boundary(i / (MESH_CONSTRAINT_STEPS * 3))
+    total += distance(previous, point)
+    previous = point
+  }
+  return total
+}
+
+function meshLayoutForBoundaries(
+  outerTop: Boundary,
+  outerRight: Boundary,
+  outerBottom: Boundary,
+  outerLeft: Boundary,
+  innerTop: Boundary,
+  innerRight: Boundary,
+  innerBottom: Boundary,
+  innerLeft: Boundary
+): MeshLayout {
+  const innerWidth = Math.max(1, (boundaryLength(innerTop) + boundaryLength(innerBottom)) / 2)
+  const innerHeight = Math.max(1, (boundaryLength(innerLeft) + boundaryLength(innerRight)) / 2)
+  const minGap = Math.max(12, Math.min(innerWidth, innerHeight) * 0.04)
+  const leftGap = Math.max(minGap, averageBoundaryDistance(outerLeft, innerLeft))
+  const rightGap = Math.max(minGap, averageBoundaryDistance(outerRight, innerRight))
+  const topGap = Math.max(minGap, averageBoundaryDistance(outerTop, innerTop))
+  const bottomGap = Math.max(minGap, averageBoundaryDistance(outerBottom, innerBottom))
+  return {
+    width: leftGap + innerWidth + rightGap,
+    height: topGap + innerHeight + bottomGap,
+    innerX0: leftGap,
+    innerX1: leftGap + innerWidth,
+    innerY0: topGap,
+    innerY1: topGap + innerHeight
+  }
+}
+
+function tpsKernel(a: Point, b: Point): number {
+  const dx = a[0] - b[0]
+  const dy = a[1] - b[1]
+  const r2 = dx * dx + dy * dy
+  return r2 <= 1e-9 ? 0 : r2 * Math.log(r2)
+}
+
+function solveLinearSystem(matrix: number[][], rhs: number[]): number[] | null {
+  const n = rhs.length
+  const rows = matrix.map((row, i) => [...row, rhs[i]])
+  for (let col = 0; col < n; col++) {
+    let pivot = col
+    for (let row = col + 1; row < n; row++) {
+      if (Math.abs(rows[row][col]) > Math.abs(rows[pivot][col])) pivot = row
+    }
+    if (Math.abs(rows[pivot][col]) < 1e-8) return null
+    if (pivot !== col) {
+      const tmp = rows[col]
+      rows[col] = rows[pivot]
+      rows[pivot] = tmp
+    }
+    const divisor = rows[col][col]
+    for (let j = col; j <= n; j++) rows[col][j] /= divisor
+    for (let row = 0; row < n; row++) {
+      if (row === col) continue
+      const factor = rows[row][col]
+      if (Math.abs(factor) < 1e-12) continue
+      for (let j = col; j <= n; j++) rows[row][j] -= factor * rows[col][j]
+    }
+  }
+  return rows.map((row) => row[n])
+}
+
+function buildTpsModel(targets: Point[], sources: Point[]): TpsModel | null {
+  const n = targets.length
+  if (n < 4 || n !== sources.length) return null
+  const size = n + 3
+  const matrix = Array.from({ length: size }, () => Array(size).fill(0))
+  const scale = Math.max(
+    1,
+    ...targets.map((point) => Math.hypot(point[0], point[1]))
+  )
+  const regularization = scale * scale * 1e-7
+
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) matrix[i][j] = tpsKernel(targets[i], targets[j])
+    matrix[i][i] += regularization
+    matrix[i][n] = 1
+    matrix[i][n + 1] = targets[i][0]
+    matrix[i][n + 2] = targets[i][1]
+    matrix[n][i] = 1
+    matrix[n + 1][i] = targets[i][0]
+    matrix[n + 2][i] = targets[i][1]
+  }
+
+  const rhsX = Array(size).fill(0)
+  const rhsY = Array(size).fill(0)
+  for (let i = 0; i < n; i++) {
+    rhsX[i] = sources[i][0]
+    rhsY[i] = sources[i][1]
+  }
+  const xWeights = solveLinearSystem(matrix, rhsX)
+  const yWeights = solveLinearSystem(matrix, rhsY)
+  if (!xWeights || !yWeights) return null
+  return { targets, xWeights, yWeights }
+}
+
+function transformTps(model: TpsModel, point: Point): Point {
+  const n = model.targets.length
+  let x = model.xWeights[n] + model.xWeights[n + 1] * point[0] + model.xWeights[n + 2] * point[1]
+  let y = model.yWeights[n] + model.yWeights[n + 1] * point[0] + model.yWeights[n + 2] * point[1]
+  for (let i = 0; i < n; i++) {
+    const k = tpsKernel(point, model.targets[i])
+    x += model.xWeights[i] * k
+    y += model.yWeights[i] * k
+  }
+  return [x, y]
+}
+
 function drawScaledPath(ctx: CanvasRenderingContext2D, path: RectPath, scale: number) {
   const first = path.nodes[0]
   ctx.beginPath()
@@ -297,6 +444,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     showMesh,
     meshDivisions,
     meshColor,
+    onViewChange,
     onAppendCorner,
     onNodeChange,
     onHandleChange,
@@ -363,8 +511,9 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       tx: (w - imageWidth * scale) / 2,
       ty: (h - imageHeight * scale) / 2
     }
+    onViewChange(scale)
     requestDraw()
-  }, [containerSize, imageWidth, imageHeight, requestDraw])
+  }, [containerSize, imageWidth, imageHeight, onViewChange, requestDraw])
 
   const zoomToActualSize = useCallback(() => {
     const { w, h } = containerSize
@@ -373,8 +522,9 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       tx: (w - imageWidth) / 2,
       ty: (h - imageHeight) / 2
     }
+    onViewChange(1)
     requestDraw()
-  }, [containerSize, imageWidth, imageHeight, requestDraw])
+  }, [containerSize, imageWidth, imageHeight, onViewChange, requestDraw])
 
   useEffect(() => {
     if (imageReady && containerSize.w > 0) fitToView()
@@ -483,7 +633,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     [hideGuides, imageToScreen]
   )
 
-  const drawProjectedMesh = useCallback((ctx: CanvasRenderingContext2D, path: RectPath, divisions: number, color: string) => {
+  const drawProjectedMesh = useCallback((ctx: CanvasRenderingContext2D, outer: RectPath, inner: RectPath, divisions: number, color: string) => {
     const safeDivisions = Math.max(2, Math.min(40, Math.round(divisions)))
     ctx.save()
     ctx.lineWidth = 1
@@ -501,27 +651,92 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       ctx.stroke()
     }
 
-    for (let x = 0; x <= safeDivisions; x++) {
-      const u = x / safeDivisions
+    const outerTop: Boundary = (u) => pointOnSide(outer, 0, u)
+    const outerRight: Boundary = (v) => pointOnSide(outer, 1, v)
+    const outerBottom: Boundary = (u) => pointOnSide(outer, 2, 1 - u)
+    const outerLeft: Boundary = (v) => pointOnSide(outer, 3, 1 - v)
+    const innerTop: Boundary = (u) => pointOnSide(inner, 0, u)
+    const innerRight: Boundary = (v) => pointOnSide(inner, 1, v)
+    const innerBottom: Boundary = (u) => pointOnSide(inner, 2, 1 - u)
+    const innerLeft: Boundary = (v) => pointOnSide(inner, 3, 1 - v)
+    const layout = meshLayoutForBoundaries(
+      outerTop,
+      outerRight,
+      outerBottom,
+      outerLeft,
+      innerTop,
+      innerRight,
+      innerBottom,
+      innerLeft
+    )
+
+    const targets: Point[] = []
+    const sources: Point[] = []
+    const seen = new Set<string>()
+    const addConstraint = (target: Point, source: Point) => {
+      const key = `${target[0].toFixed(3)},${target[1].toFixed(3)}`
+      if (seen.has(key)) return
+      seen.add(key)
+      targets.push(target)
+      sources.push(source)
+    }
+    for (let i = 0; i <= MESH_CONSTRAINT_STEPS; i++) {
+      const t = i / MESH_CONSTRAINT_STEPS
+      addConstraint([layout.width * t, 0], outerTop(t))
+      addConstraint([layout.width, layout.height * t], outerRight(t))
+      addConstraint([layout.width * t, layout.height], outerBottom(t))
+      addConstraint([0, layout.height * t], outerLeft(t))
+      addConstraint([lerp([layout.innerX0, 0], [layout.innerX1, 0], t)[0], layout.innerY0], innerTop(t))
+      addConstraint([layout.innerX1, lerp([0, layout.innerY0], [0, layout.innerY1], t)[1]], innerRight(t))
+      addConstraint([lerp([layout.innerX0, 0], [layout.innerX1, 0], t)[0], layout.innerY1], innerBottom(t))
+      addConstraint([layout.innerX0, lerp([0, layout.innerY0], [0, layout.innerY1], t)[1]], innerLeft(t))
+    }
+    const model = buildTpsModel(targets, sources)
+    if (!model) {
+      ctx.restore()
+      return
+    }
+
+    const addUnique = (values: number[], value: number) => {
+      if (!values.some((existing) => Math.abs(existing - value) < 1e-6)) values.push(value)
+    }
+    const gridXs: number[] = []
+    const gridYs: number[] = []
+    for (let i = 0; i <= safeDivisions; i++) {
+      gridXs.push((layout.width * i) / safeDivisions)
+      gridYs.push((layout.height * i) / safeDivisions)
+    }
+    addUnique(gridXs, layout.innerX0)
+    addUnique(gridXs, layout.innerX1)
+    addUnique(gridYs, layout.innerY0)
+    addUnique(gridYs, layout.innerY1)
+    gridXs.sort((a, b) => a - b)
+    gridYs.sort((a, b) => a - b)
+
+    const lineSamples = Math.max(32, safeDivisions * 3)
+    for (const x of gridXs) {
       const points: Point[] = []
-      for (let y = 0; y <= safeDivisions; y++) {
-        points.push(coonsPoint(path, u, y / safeDivisions))
+      for (let i = 0; i <= lineSamples; i++) {
+        points.push(transformTps(model, [x, (layout.height * i) / lineSamples]))
       }
       drawMeshLine(points)
     }
-    for (let y = 0; y <= safeDivisions; y++) {
-      const v = y / safeDivisions
+    for (const y of gridYs) {
       const points: Point[] = []
-      for (let x = 0; x <= safeDivisions; x++) {
-        points.push(coonsPoint(path, x / safeDivisions, v))
+      for (let i = 0; i <= lineSamples; i++) {
+        points.push(transformTps(model, [(layout.width * i) / lineSamples, y]))
       }
       drawMeshLine(points)
     }
+
     ctx.setLineDash([])
     ctx.globalAlpha = 0.95
     ctx.strokeStyle = color
     ctx.lineWidth = 1.5
-    const center = coonsPoint(path, 0.5, 0.5)
+    const center = transformTps(model, [
+      (layout.innerX0 + layout.innerX1) / 2,
+      (layout.innerY0 + layout.innerY1) / 2
+    ])
     const [cx, cy] = imageToScreen(center[0], center[1])
     ctx.beginPath()
     ctx.arc(cx, cy, 3, 0, Math.PI * 2)
@@ -604,7 +819,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       meshColor: curMeshColor
     } = propsRef.current
     const activeRole = roleFromTool(curTool)
-    if (op && meshVisible) {
+    if (op && ip && meshVisible) {
       let effectiveMeshColor = curMeshColor
       if (curMeshColor === INVERSE_MESH_COLOR && img) {
         const key = `${src}|${imageWidth}x${imageHeight}|${ip ? pathCacheKey(ip) : 'no-inner'}`
@@ -616,7 +831,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
         }
         effectiveMeshColor = inverseColorRef.current.color
       }
-      drawProjectedMesh(ctx, op, curMeshDivisions, effectiveMeshColor)
+      drawProjectedMesh(ctx, op, ip, curMeshDivisions, effectiveMeshColor)
     }
     if (op) drawPath(ctx, op, 'outer', activeRole, 1)
     if (ip) drawPath(ctx, ip, 'inner', activeRole, 1)
@@ -851,6 +1066,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
         v.scale = nextScale
         v.tx = x - ix * nextScale
         v.ty = y - iy * nextScale
+        onViewChange(nextScale)
       } else {
         viewRef.current.tx -= e.deltaX
         viewRef.current.ty -= e.deltaY
@@ -859,7 +1075,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     }
     canvas.addEventListener('wheel', onWheel, { passive: false })
     return () => canvas.removeEventListener('wheel', onWheel)
-  }, [requestDraw])
+  }, [onViewChange, requestDraw])
 
   return (
     <div ref={containerRef} style={{ position: 'absolute', inset: 0 }}>

@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, protocol, net } from 'electron'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join, basename, extname } from 'node:path'
-import { readFileSync, existsSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { spawn, ChildProcessWithoutNullStreams } from 'node:child_process'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -10,6 +10,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = join(__dirname, '..', '..')
 const pythonScript = join(projectRoot, 'python', 'sidecar.py')
 const venvPython = join(projectRoot, 'python', '.venv', 'bin', 'python3')
+const outputDir = join(projectRoot, 'output')
 
 type PendingCall = {
   resolve: (value: unknown) => void
@@ -157,6 +158,27 @@ async function loadImage(path: string) {
   }
 }
 
+function correctedOutputPath(imagePath: string) {
+  mkdirSync(outputDir, { recursive: true })
+  const base = basename(imagePath, extname(imagePath))
+  return join(outputDir, `${base}_corrected.jpg`)
+}
+
+function previewOutputPath(imagePath: string) {
+  mkdirSync(outputDir, { recursive: true })
+  const base = basename(imagePath, extname(imagePath))
+  return join(outputDir, `.${base}_preview.jpg`)
+}
+
+async function exportCorrectedTo(imagePath: string, corners: number[][], quality: number, outputPath: string) {
+  return sidecar.call('export_corrected', {
+    path: imagePath,
+    corners,
+    output_path: outputPath,
+    quality
+  })
+}
+
 ipcMain.handle('open-image', async () => {
   const result = await dialog.showOpenDialog({
     title: 'Open image',
@@ -172,15 +194,33 @@ ipcMain.handle('open-image-path', async (_evt, imagePath: string) => {
 })
 
 ipcMain.handle('export-corrected', async (_evt, imagePath: string, corners: number[][], quality: number) => {
-  const dir = dirname(imagePath)
+  return exportCorrectedTo(imagePath, corners, quality, correctedOutputPath(imagePath))
+})
+
+ipcMain.handle('export-corrected-as', async (_evt, imagePath: string, corners: number[][], quality: number) => {
   const base = basename(imagePath, extname(imagePath))
-  const outputPath = join(dir, `${base}_corrected.jpg`)
-  return sidecar.call('export_corrected', {
-    path: imagePath,
-    corners,
-    output_path: outputPath,
-    quality
+  mkdirSync(outputDir, { recursive: true })
+  const result = await dialog.showSaveDialog({
+    title: 'Export corrected image',
+    defaultPath: join(outputDir, `${base}_corrected.jpg`),
+    filters: [{ name: 'JPEG', extensions: ['jpg', 'jpeg'] }]
   })
+  if (result.canceled || !result.filePath) return null
+  return exportCorrectedTo(imagePath, corners, quality, result.filePath)
+})
+
+ipcMain.handle('preview-corrected', async (_evt, imagePath: string, corners: number[][], quality: number) => {
+  const outputPath = previewOutputPath(imagePath)
+  const result = await exportCorrectedTo(imagePath, corners, quality, outputPath) as {
+    outputWidth: number
+    outputHeight: number
+  }
+  return {
+    path: outputPath,
+    width: result.outputWidth,
+    height: result.outputHeight,
+    dataUrl: `local-image://localhost${outputPath}?t=${Date.now()}`
+  }
 })
 
 app.whenReady().then(() => {

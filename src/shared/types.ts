@@ -43,6 +43,16 @@ export type SerigraphicaAPI = {
     corners: Quad,
     quality: number
   ) => Promise<ExportResult>
+  exportCorrectedAs: (
+    imagePath: string,
+    corners: Quad,
+    quality: number
+  ) => Promise<ExportResult | null>
+  previewCorrected: (
+    imagePath: string,
+    corners: Quad,
+    quality: number
+  ) => Promise<LoadedImage>
 }
 
 declare global {

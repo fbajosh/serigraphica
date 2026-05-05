@@ -38,20 +38,47 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   height: 100%;
 }
 
-.toolbar {
-  grid-column: 1 / 3;
+.main-toolbar,
+.view-toolbar {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 12px;
   background: #222;
   border-bottom: 1px solid #333;
   -webkit-app-region: drag;
+}
+
+.main-toolbar {
+  grid-column: 1;
+  grid-row: 1;
+  justify-content: flex-start;
+  padding: 0 12px;
   padding-left: 80px;
 }
 
-.toolbar button, .toolbar input { -webkit-app-region: no-drag; }
-.toolbar .sep {
+.view-toolbar {
+  grid-column: 2;
+  grid-row: 1;
+  justify-content: flex-end;
+  padding: 0 10px;
+  border-left: 1px solid #333;
+}
+
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.main-toolbar button,
+.main-toolbar input,
+.view-toolbar button,
+.view-toolbar input {
+  -webkit-app-region: no-drag;
+}
+
+.main-toolbar .sep,
+.view-toolbar .sep {
   display: inline-block;
   width: 1px;
   height: 20px;
@@ -59,13 +86,27 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   margin: 0 4px;
 }
 
-.toolbar .filename {
-  margin-left: 12px;
-  color: #999;
-  font-size: 12px;
+.view-pill {
+  min-width: 48px;
+  padding: 5px 8px;
+  border: 1px solid #444;
+  border-radius: 4px;
+  background: #181818;
+  color: #aaa;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.filename-pill {
+  min-width: 0;
+  max-width: 122px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .canvas-host {
+  grid-column: 1;
+  grid-row: 2;
   position: relative;
   overflow: hidden;
   background: #0e0e0e;
@@ -86,6 +127,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 
 .panel {
+  grid-column: 2;
+  grid-row: 2;
+  display: flex;
+  flex-direction: column;
   background: #1f1f1f;
   border-left: 1px solid #333;
   padding: 14px;
@@ -113,6 +158,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .path-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   margin-top: 10px;
 }
@@ -135,7 +181,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   height: 6px;
   border-radius: 999px;
   border: 0;
-  background: var(--slider-color);
+  background: linear-gradient(90deg, var(--slider-color) 0 var(--slider-fill), #3a3a3a var(--slider-fill) 100%);
   box-shadow: 0 0 0 1px #858585;
 }
 
@@ -152,10 +198,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 
 .color-slider::-moz-range-track {
-  height: 8px;
+  height: 6px;
   border-radius: 999px;
   border: 0;
-  background: var(--slider-color);
+  background: linear-gradient(90deg, var(--slider-color) 0 var(--slider-fill), #3a3a3a var(--slider-fill) 100%);
   box-shadow: 0 0 0 1px #858585;
 }
 
@@ -170,6 +216,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .statusbar {
   grid-column: 1 / 3;
+  grid-row: 3;
   display: flex;
   align-items: center;
   padding: 0 12px;
@@ -177,6 +224,12 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   border-top: 1px solid #2a2a2a;
   color: #888;
   font-size: 11px;
+}
+
+.debug-section {
+  margin-top: auto;
+  padding-top: 14px;
+  border-top: 1px solid #333;
 }
 
 .empty-state {
@@ -187,67 +240,6 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   color: #666;
   font-size: 14px;
   pointer-events: none;
-}
-
-.debug-outlines {
-  position: fixed;
-  right: 14px;
-  bottom: 38px;
-  z-index: 20;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 8px;
-  pointer-events: none;
-}
-
-.debug-outlines button,
-.debug-modal {
-  pointer-events: auto;
-}
-
-.debug-fab {
-  background: #2f3a2f;
-  border-color: #5a725a;
-  color: #e8f4e8;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-}
-
-.debug-fab:hover {
-  background: #384638;
-}
-
-.debug-modal {
-  width: 300px;
-  max-width: calc(100vw - 28px);
-  background: #202420;
-  border: 1px solid #536353;
-  border-radius: 6px;
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
-  overflow: hidden;
-}
-
-.debug-modal-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 10px 8px 12px;
-  border-bottom: 1px solid #394439;
-}
-
-.debug-modal-header strong {
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: #cfe2cf;
-}
-
-.debug-modal-header button {
-  padding: 2px 8px;
-}
-
-.debug-modal-body {
-  padding: 10px 12px 12px;
 }
 
 .debug-row {

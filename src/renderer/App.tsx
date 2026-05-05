@@ -76,17 +76,6 @@ function pathFromCorners(corners: Point[]): RectPath {
   return { nodes, cornerIndices: [0, 1, 2, 3] }
 }
 
-function defaultPath(width: number, height: number, role: Role): RectPath {
-  const insetX = width * (role === 'outer' ? 0.08 : 0.22)
-  const insetY = height * (role === 'outer' ? 0.08 : 0.22)
-  return pathFromCorners([
-    [insetX, insetY],
-    [width - insetX, insetY],
-    [width - insetX, height - insetY],
-    [insetX, height - insetY]
-  ])
-}
-
 function pathCorners(path: RectPath | null): Quad | null {
   if (!path) return null
   const corners = path.cornerIndices.map((index) => path.nodes[index]?.point)
@@ -134,8 +123,9 @@ export function App() {
   const [showMesh, setShowMesh] = useState(false)
   const [meshDivisions, setMeshDivisions] = useState(10)
   const [meshColorIndex, setMeshColorIndex] = useState(0)
+  const [zoomLevel, setZoomLevel] = useState(1)
+  const [dewarpPreview, setDewarpPreview] = useState<Loaded | null>(null)
   const [dragActive, setDragActive] = useState(false)
-  const [debugOpen, setDebugOpen] = useState(false)
   const [debugMessage, setDebugMessage] = useState('')
   const [savedDebugOutline, setSavedDebugOutline] = useState<SavedManualOutlineMeta | null>(null)
   const canvasRef = useRef<CanvasHandle>(null)
@@ -153,6 +143,8 @@ export function App() {
     setTool('pen-outer')
     setShowMesh(false)
     setMeshColorIndex(0)
+    setZoomLevel(1)
+    setDewarpPreview(null)
     setDebugMessage('')
     refreshSavedDebugOutline(imageFilename(res.path))
     setStatus('Outer Pen: click four outer corners in order around the paper')
@@ -210,20 +202,24 @@ export function App() {
     else setInnerPath(next)
   }, [])
 
-  const handleStartDefaultPath = useCallback((role: Role) => {
-    if (!image) return
-    setPathForRole(role, defaultPath(image.width, image.height, role))
-    setDrafts((prev) => ({ ...prev, [role]: [] }))
-    setTool(role === 'outer' ? 'pen-outer' : 'pen-inner')
-    setStatus(`${roleLabel(role)} path initialized. Drag nodes, drag yellow handles, or click a segment to add a node.`)
-  }, [image, setPathForRole])
-
-  const handleClearPath = useCallback((role: Role) => {
+  const handleResetPath = useCallback((role: Role) => {
     setPathForRole(role, null)
     setDrafts((prev) => ({ ...prev, [role]: [] }))
     setTool(role === 'outer' ? 'pen-outer' : 'pen-inner')
-    setStatus(`${roleLabel(role)} path cleared`)
+    setDewarpPreview(null)
+    setShowMesh(false)
+    setStatus(`${roleLabel(role)} path reset`)
   }, [setPathForRole])
+
+  const handleResetAll = useCallback(() => {
+    setOuterPath(null)
+    setInnerPath(null)
+    setDrafts({ outer: [], inner: [] })
+    setDewarpPreview(null)
+    setShowMesh(false)
+    setTool('pen-outer')
+    setStatus('Reset outer and inner rectangles')
+  }, [])
 
   const handleAppendCorner = useCallback((role: Role, point: Point) => {
     if (pathForRole(role)) return
@@ -243,26 +239,39 @@ export function App() {
   const handleNodeChange = useCallback((role: Role, index: number, point: Point) => {
     const setter = role === 'outer' ? setOuterPath : setInnerPath
     setter((prev) => (prev ? movePathNode(prev, index, point) : prev))
+    setDewarpPreview(null)
   }, [])
 
   const handleHandleChange = useCallback((role: Role, index: number, handle: Point) => {
     const setter = role === 'outer' ? setOuterPath : setInnerPath
     setter((prev) => (prev ? setPathHandle(prev, index, handle) : prev))
+    setDewarpPreview(null)
   }, [])
 
   const handleInsertNode = useCallback((role: Role, segmentIndex: number, node: BezierNode) => {
     const setter = role === 'outer' ? setOuterPath : setInnerPath
     setter((prev) => (prev ? insertPathNode(prev, segmentIndex, node) : prev))
+    setDewarpPreview(null)
     setStatus(`${roleLabel(role)} node added`)
   }, [])
 
-  const handleExport = useCallback(async () => {
-    if (!image || !outerPath) return
+  const outerCornersOrStatus = useCallback((): Quad | null => {
+    if (!outerPath) {
+      setStatus('Create the outer path first')
+      return null
+    }
     const corners = pathCorners(outerPath)
     if (!corners) {
       setStatus('Outer path does not have four corner nodes')
-      return
+      return null
     }
+    return corners
+  }, [outerPath])
+
+  const handleExport = useCallback(async () => {
+    if (!image) return
+    const corners = outerCornersOrStatus()
+    if (!corners) return
     setBusy(true)
     setStatus('Exporting...')
     try {
@@ -273,19 +282,61 @@ export function App() {
     } finally {
       setBusy(false)
     }
-  }, [image, outerPath])
+  }, [image, outerCornersOrStatus])
+
+  const handleExportAs = useCallback(async () => {
+    if (!image) return
+    const corners = outerCornersOrStatus()
+    if (!corners) return
+    setBusy(true)
+    setStatus('Exporting...')
+    try {
+      const out = await window.serigraphica.exportCorrectedAs(image.path, corners, 92)
+      if (!out) {
+        setStatus('Export cancelled')
+        return
+      }
+      setStatus(`Exported ${out.outputWidth}x${out.outputHeight} -> ${out.outputPath}`)
+    } catch (err) {
+      setStatus(`Error: ${(err as Error).message}`)
+    } finally {
+      setBusy(false)
+    }
+  }, [image, outerCornersOrStatus])
+
+  const handleDewarp = useCallback(async () => {
+    if (!image) return
+    if (dewarpPreview) {
+      setDewarpPreview(null)
+      setStatus('Returned to original image')
+      return
+    }
+    const corners = outerCornersOrStatus()
+    if (!corners) return
+    setBusy(true)
+    setStatus('Generating dewarp preview...')
+    try {
+      const preview = await window.serigraphica.previewCorrected(image.path, corners, 92)
+      setDewarpPreview(preview)
+      setStatus(`Dewarp preview ${preview.width}x${preview.height}`)
+    } catch (err) {
+      setStatus(`Error: ${(err as Error).message}`)
+    } finally {
+      setBusy(false)
+    }
+  }, [dewarpPreview, image, outerCornersOrStatus])
 
   const handleProjectMesh = useCallback(() => {
-    if (!outerPath) {
-      setStatus('Create the outer path before projecting the mesh')
+    if (!outerPath || !innerPath) {
+      setStatus('Create both outer and inner paths before projecting the mesh')
       return
     }
     setShowMesh((visible) => {
       const next = !visible
-      setStatus(next ? 'Projected mesh inside the outer path' : 'Mesh hidden')
+      setStatus(next ? 'Projected mesh using outer and inner paths' : 'Mesh hidden')
       return next
     })
-  }, [outerPath])
+  }, [innerPath, outerPath])
 
   const handleSaveDebugOutlines = useCallback(() => {
     if (!image) return
@@ -324,6 +375,8 @@ export function App() {
     setInnerPath(saved.innerPath)
     setDrafts({ outer: [], inner: [] })
     setTool('pen-outer')
+    setShowMesh(false)
+    setDewarpPreview(null)
     refreshSavedDebugOutline(targetFilename)
     const sizeWarning = saved.imageWidth !== image.width || saved.imageHeight !== image.height
       ? ' Dimensions differ from the open image.'
@@ -383,33 +436,48 @@ export function App() {
 
   const outerCorners = pathCorners(outerPath)
   const hasAnyPath = Boolean(outerPath || innerPath || drafts.outer.length || drafts.inner.length)
+  const displayImage = dewarpPreview ?? image
+  const dewarpActive = Boolean(dewarpPreview)
+  const displayFilename = dewarpActive ? `${filename} preview` : filename
+  const meshVisibleInCanvas = showMesh && !dewarpActive
   const meshSliderColor = MESH_COLORS[meshColorIndex] === 'inverse' ? DEFAULT_ACCENT_COLOR : MESH_COLORS[meshColorIndex]
+  const meshLabelColor = MESH_COLORS[meshColorIndex] === 'inverse' ? '#fff' : meshSliderColor
   const meshColorPercent = `${(meshColorIndex / (MESH_COLORS.length - 1)) * 100}%`
 
   return (
     <div className="app">
-      <div className="toolbar">
-        <button onClick={handleOpen} disabled={busy}>Open</button>
+      <div className="main-toolbar">
+        <div className="toolbar-group">
+          <button onClick={handleOpen} disabled={busy}>Open</button>
+        </div>
         <span className="sep" />
-        <ToolButton active={tool === 'pan'} onClick={() => setTool('pan')} title="Pan/move (V)">Pan</ToolButton>
-        <ToolButton active={tool === 'pen-outer'} onClick={() => setTool('pen-outer')} title="Outer Pen (1)" color="#ff5e5e">Outer Pen</ToolButton>
-        <ToolButton active={tool === 'pen-inner'} onClick={() => setTool('pen-inner')} title="Inner Pen (2)" color="#4ea1ff">Inner Pen</ToolButton>
+        <div className="toolbar-group">
+          <ToolButton active={tool === 'pen-outer'} onClick={() => setTool('pen-outer')} title="Outer Pen (1)" color="#ff5e5e">Outer</ToolButton>
+          <ToolButton active={tool === 'pen-inner'} onClick={() => setTool('pen-inner')} title="Inner Pen (2)" color="#4ea1ff">Inner</ToolButton>
+          <ToolButton active={tool === 'pan'} onClick={() => setTool('pan')} title="Pan/move (V)">Pan</ToolButton>
+          <button onClick={handleResetAll} disabled={!hasAnyPath}>Reset</button>
+        </div>
         <span className="sep" />
-        <button onClick={() => handleStartDefaultPath('outer')} disabled={busy || !image}>New Outer</button>
-        <button onClick={() => handleStartDefaultPath('inner')} disabled={busy || !image}>New Inner</button>
+        <div className="toolbar-group">
+          <ToolButton active={showMesh} onClick={handleProjectMesh} title="Project mesh using both rectangles">
+            Mesh
+          </ToolButton>
+          <ToolButton active={dewarpActive} onClick={handleDewarp} disabled={busy || !image || !outerCorners} title="Toggle dewarp preview">
+            Dewarp
+          </ToolButton>
+        </div>
         <span className="sep" />
-        <ToolButton active={hideGuides} onClick={() => setHideGuides((hidden) => !hidden)} title="Hide node handles">
-          Hide Handles
-        </ToolButton>
-        <ToolButton active={showMesh} onClick={handleProjectMesh} title="Project mesh inside the outer path">
-          Project Mesh
-        </ToolButton>
-        <span className="sep" />
+        <div className="toolbar-group">
+          <button onClick={handleExport} disabled={busy || !image || !outerCorners}>Export</button>
+          <button onClick={handleExportAs} disabled={busy || !image || !outerCorners}>Export As</button>
+        </div>
+      </div>
+
+      <div className="view-toolbar">
         <button onClick={() => canvasRef.current?.fitToView()} disabled={!image}>Fit</button>
         <button onClick={() => canvasRef.current?.zoomToActualSize()} disabled={!image}>100%</button>
-        <span style={{ flex: 1 }} />
-        <button onClick={handleExport} disabled={busy || !image || !outerCorners}>Export</button>
-        {image && <span className="filename">{filename}</span>}
+        <span className="view-pill">{Math.round(zoomLevel * 100)}%</span>
+        <span className="view-pill filename-pill">{displayFilename || 'No file'}</span>
       </div>
 
       <div
@@ -432,21 +500,23 @@ export function App() {
         }}
         onDrop={handleCanvasDrop}
       >
-        {image ? (
+        {displayImage ? (
           <Canvas
+            key={displayImage.path}
             ref={canvasRef}
-            src={image.dataUrl}
-            imageWidth={image.width}
-            imageHeight={image.height}
-            tool={tool}
-            outerPath={outerPath}
-            innerPath={innerPath}
-            outerDraft={drafts.outer}
-            innerDraft={drafts.inner}
+            src={displayImage.dataUrl}
+            imageWidth={displayImage.width}
+            imageHeight={displayImage.height}
+            tool={dewarpActive ? 'pan' : tool}
+            outerPath={dewarpActive ? null : outerPath}
+            innerPath={dewarpActive ? null : innerPath}
+            outerDraft={dewarpActive ? [] : drafts.outer}
+            innerDraft={dewarpActive ? [] : drafts.inner}
             hideGuides={hideGuides}
-            showMesh={showMesh}
+            showMesh={meshVisibleInCanvas}
             meshDivisions={meshDivisions}
             meshColor={MESH_COLORS[meshColorIndex]}
+            onViewChange={setZoomLevel}
             onAppendCorner={handleAppendCorner}
             onNodeChange={handleNodeChange}
             onHandleChange={handleHandleChange}
@@ -461,9 +531,10 @@ export function App() {
         <section>
           <h3>Active tool</h3>
           <div style={{ color: '#ccc' }}>
-            {tool === 'pan' && 'Pan - drag empty canvas to move the view'}
-            {tool === 'pen-outer' && 'Outer Pen - mark/edit the paper perimeter'}
-            {tool === 'pen-inner' && 'Inner Pen - mark/edit the print perimeter'}
+            {dewarpActive && 'Dewarp preview - press Dewarp again to return to the original image'}
+            {!dewarpActive && tool === 'pan' && 'Pan - drag empty canvas to move the view'}
+            {!dewarpActive && tool === 'pen-outer' && 'Outer Pen - mark/edit the paper perimeter'}
+            {!dewarpActive && tool === 'pen-inner' && 'Inner Pen - mark/edit the print perimeter'}
           </div>
         </section>
         <section>
@@ -471,15 +542,20 @@ export function App() {
           <PathRow label="Outer" color="#ff5e5e" path={outerPath} draftCount={drafts.outer.length} />
           <PathRow label="Inner" color="#4ea1ff" path={innerPath} draftCount={drafts.inner.length} />
           <div className="path-actions">
-            <button onClick={() => handleClearPath('outer')} disabled={!outerPath && drafts.outer.length === 0}>Clear Outer</button>
-            <button onClick={() => handleClearPath('inner')} disabled={!innerPath && drafts.inner.length === 0}>Clear Inner</button>
+            <button onClick={() => handleResetPath('outer')} disabled={!outerPath && drafts.outer.length === 0}>Reset Outer</button>
+            <button onClick={() => handleResetPath('inner')} disabled={!innerPath && drafts.inner.length === 0}>Reset Inner</button>
+            <ToolButton active={hideGuides} onClick={() => setHideGuides((hidden) => !hidden)} title="Hide node handles">
+              Hide Handles
+            </ToolButton>
           </div>
         </section>
         <section>
           <h3>Projected mesh</h3>
           <div className="row">
             <label>State</label>
-            <span style={{ color: showMesh ? '#88ffcd' : '#666' }}>{showMesh ? 'visible' : 'hidden'}</span>
+            <span style={{ color: meshVisibleInCanvas ? '#88ffcd' : '#666' }}>
+              {meshVisibleInCanvas ? 'visible' : dewarpActive && showMesh ? 'hidden in preview' : 'hidden'}
+            </span>
           </div>
           <div className="row">
             <label>Density</label>
@@ -495,7 +571,7 @@ export function App() {
           />
           <div className="row" style={{ marginTop: 10 }}>
             <label>Color</label>
-            <span style={{ color: meshSliderColor }}>
+            <span style={{ color: meshLabelColor }}>
               {MESH_COLOR_LABELS[meshColorIndex]}
             </span>
           </div>
@@ -513,14 +589,7 @@ export function App() {
             } as React.CSSProperties & Record<'--slider-color' | '--slider-fill', string>}
           />
           <div style={{ color: '#888', fontSize: 11, marginTop: 6 }}>
-            Mesh is projected from the curved outer boundary. It updates live as nodes and handles move.
-          </div>
-        </section>
-        <section>
-          <h3>How to mark</h3>
-          <div style={{ color: '#888', lineHeight: 1.5 }}>
-            Use Outer Pen and click four outer corners in order around the paper. Repeat with Inner Pen for the print rectangle.
-            After a path exists, drag nodes to move them. Click directly on a path segment to add a yellow side node; drag its yellow handles to shape the curve.
+            Mesh is projected from both rectangles. The outer path anchors the boundary; the inner path constrains the interior.
           </div>
         </section>
         <section>
@@ -530,58 +599,46 @@ export function App() {
             Cmd+0 fit, Cmd+1 100%.
           </div>
         </section>
+        <section className="debug-section">
+          <h3>Debug paths</h3>
+          <div className="debug-row">
+            <span>Filename</span>
+            <b>{filename || 'No image'}</b>
+          </div>
+          <div className="debug-row">
+            <span>Current</span>
+            <b>{outerPath?.nodes.length ?? 0} outer / {innerPath?.nodes.length ?? 0} inner</b>
+          </div>
+          <div className="debug-row">
+            <span>Saved</span>
+            <b>
+              {savedDebugOutline
+                ? `${savedDebugOutline.outerNodes} outer / ${savedDebugOutline.innerNodes} inner`
+                : 'None'}
+            </b>
+          </div>
+          {savedDebugOutline && (
+            <>
+              <div className="debug-row">
+                <span>Saved at</span>
+                <b>{new Date(savedDebugOutline.savedAt).toLocaleString()}</b>
+              </div>
+              <div className="debug-row">
+                <span>Size</span>
+                <b>{savedDebugOutline.imageWidth}x{savedDebugOutline.imageHeight}</b>
+              </div>
+            </>
+          )}
+          {debugMessage && <div className="debug-message">{debugMessage}</div>}
+          <div className="debug-actions">
+            <button onClick={handleSaveDebugOutlines} disabled={!image || !hasAnyPath}>Save</button>
+            <button onClick={handleLoadDebugOutlines} disabled={!image || !savedDebugOutline}>Load</button>
+            <button onClick={handleDeleteDebugOutlines} disabled={!image || !savedDebugOutline}>Delete</button>
+          </div>
+        </section>
       </div>
 
       <div className="statusbar">{status}</div>
-      <div className="debug-outlines">
-        {debugOpen && (
-          <div className="debug-modal" role="dialog" aria-label="Debug manual paths">
-            <div className="debug-modal-header">
-              <strong>Debug paths</strong>
-              <button onClick={() => setDebugOpen(false)} aria-label="Close debug paths">x</button>
-            </div>
-            <div className="debug-modal-body">
-              <div className="debug-row">
-                <span>Filename</span>
-                <b>{filename || 'No image'}</b>
-              </div>
-              <div className="debug-row">
-                <span>Current</span>
-                <b>{outerPath?.nodes.length ?? 0} outer / {innerPath?.nodes.length ?? 0} inner</b>
-              </div>
-              <div className="debug-row">
-                <span>Saved</span>
-                <b>
-                  {savedDebugOutline
-                    ? `${savedDebugOutline.outerNodes} outer / ${savedDebugOutline.innerNodes} inner`
-                    : 'None'}
-                </b>
-              </div>
-              {savedDebugOutline && (
-                <>
-                  <div className="debug-row">
-                    <span>Saved at</span>
-                    <b>{new Date(savedDebugOutline.savedAt).toLocaleString()}</b>
-                  </div>
-                  <div className="debug-row">
-                    <span>Size</span>
-                    <b>{savedDebugOutline.imageWidth}x{savedDebugOutline.imageHeight}</b>
-                  </div>
-                </>
-              )}
-              {debugMessage && <div className="debug-message">{debugMessage}</div>}
-              <div className="debug-actions">
-                <button onClick={handleSaveDebugOutlines} disabled={!image || !hasAnyPath}>Save</button>
-                <button onClick={handleLoadDebugOutlines} disabled={!image || !savedDebugOutline}>Load</button>
-                <button onClick={handleDeleteDebugOutlines} disabled={!image || !savedDebugOutline}>Delete</button>
-              </div>
-            </div>
-          </div>
-        )}
-        <button className="debug-fab" onClick={() => setDebugOpen((open) => !open)}>
-          Debug
-        </button>
-      </div>
     </div>
   )
 }
@@ -589,18 +646,21 @@ export function App() {
 function ToolButton({
   active,
   color,
+  disabled = false,
   onClick,
   title,
   children
 }: {
   active: boolean
   color?: string
+  disabled?: boolean
   onClick: () => void
   title: string
   children: React.ReactNode
 }) {
   return (
     <button
+      disabled={disabled}
       onClick={onClick}
       title={title}
       style={{
