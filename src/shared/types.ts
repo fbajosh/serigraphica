@@ -2,9 +2,7 @@ export type Point = [number, number]
 
 export type Quad = [Point, Point, Point, Point]
 
-export type Role = 'outer' | 'inner'
-
-export type Tool = 'pan' | 'pen-outer' | 'pen-inner'
+export type Tool = 'pan' | 'pen-rectangle'
 
 export type BezierNode = {
   point: Point

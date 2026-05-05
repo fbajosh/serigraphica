@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react'
 import { Canvas, CanvasHandle } from './components/Canvas'
-import type { BezierNode, Point, Quad, RectPath, Role, Tool } from '../shared/types'
+import type { BezierNode, Point, Quad, RectPath, Tool } from '../shared/types'
 
 type Loaded = {
   path: string
@@ -9,14 +9,23 @@ type Loaded = {
   dataUrl: string
 }
 
-type DraftState = { outer: Point[]; inner: Point[] }
-
-const DEBUG_OUTLINES_KEY = 'serigraphica.manualOutlines.v2'
+const DEBUG_OUTLINES_KEY = 'serigraphica.manualOutlines.v3'
+const LEGACY_DEBUG_OUTLINES_KEY = 'serigraphica.manualOutlines.v2'
 const DEFAULT_ACCENT_COLOR = '#ff5e5e'
 const MESH_COLORS = ['inverse', '#ffffff', '#ff4d4d', '#ffd84d', '#5ee05e', '#4de8ff', '#4d79ff', '#ff5cff', '#000000'] as const
 const MESH_COLOR_LABELS = ['Inverse', 'White', 'Red', 'Yellow', 'Green', 'Cyan', 'Blue', 'Magenta', 'Black'] as const
+const RECTANGLE_COLORS = ['#ff5e5e', '#4ea1ff', '#4de8ff', '#5ee05e', '#ffd84d', '#ff5cff'] as const
 
 type SavedManualOutline = {
+  version: 3
+  filename: string
+  savedAt: string
+  imageWidth: number
+  imageHeight: number
+  rectangles: RectPath[]
+}
+
+type LegacySavedManualOutline = {
   version: 2
   filename: string
   savedAt: string
@@ -30,8 +39,7 @@ type SavedManualOutlineMeta = {
   savedAt: string
   imageWidth: number
   imageHeight: number
-  outerNodes: number
-  innerNodes: number
+  rectangleNodes: number[]
 }
 
 function imageFilename(path: string): string {
@@ -52,7 +60,24 @@ function writeDebugOutlineStore(store: Record<string, SavedManualOutline>) {
 }
 
 function getSavedDebugOutline(filename: string): SavedManualOutline | null {
-  return readDebugOutlineStore()[filename] ?? null
+  const saved = readDebugOutlineStore()[filename]
+  if (saved) return saved
+  try {
+    const raw = window.localStorage.getItem(LEGACY_DEBUG_OUTLINES_KEY)
+    const legacyStore = raw ? JSON.parse(raw) as Record<string, LegacySavedManualOutline> : {}
+    const legacy = legacyStore[filename]
+    if (!legacy) return null
+    return {
+      version: 3,
+      filename,
+      savedAt: legacy.savedAt,
+      imageWidth: legacy.imageWidth,
+      imageHeight: legacy.imageHeight,
+      rectangles: [legacy.outerPath, legacy.innerPath].filter(Boolean) as RectPath[]
+    }
+  } catch {
+    return null
+  }
 }
 
 function getSavedDebugOutlineMeta(filename: string): SavedManualOutlineMeta | null {
@@ -62,8 +87,7 @@ function getSavedDebugOutlineMeta(filename: string): SavedManualOutlineMeta | nu
     savedAt: saved.savedAt,
     imageWidth: saved.imageWidth,
     imageHeight: saved.imageHeight,
-    outerNodes: saved.outerPath?.nodes.length ?? 0,
-    innerNodes: saved.innerPath?.nodes.length ?? 0
+    rectangleNodes: saved.rectangles.map((path) => path.nodes.length)
   }
 }
 
@@ -107,16 +131,58 @@ function insertPathNode(path: RectPath, segmentIndex: number, node: BezierNode):
   return { nodes, cornerIndices }
 }
 
-function roleLabel(role: Role): string {
-  return role === 'outer' ? 'Outer' : 'Inner'
+function deletePathNode(path: RectPath, index: number): RectPath {
+  const nodes = path.nodes.filter((_, i) => i !== index)
+  const cornerIndices = path.cornerIndices.map((cornerIndex) => (
+    cornerIndex > index ? cornerIndex - 1 : cornerIndex
+  )) as [number, number, number, number]
+  return { nodes, cornerIndices }
+}
+
+function pathArea(path: RectPath): number {
+  const corners = path.cornerIndices.map((index) => path.nodes[index]?.point).filter(Boolean) as Point[]
+  if (corners.length < 4) return 0
+  let area = 0
+  for (let i = 0; i < corners.length; i++) {
+    const a = corners[i]
+    const b = corners[(i + 1) % corners.length]
+    area += a[0] * b[1] - b[0] * a[1]
+  }
+  return Math.abs(area) / 2
+}
+
+function deriveRectangles(rectangles: RectPath[]) {
+  if (rectangles.length === 0) {
+    return { outerIndex: null as number | null, outerPath: null as RectPath | null, innerIndices: [] as number[], innerPaths: [] as RectPath[] }
+  }
+  const sorted = rectangles
+    .map((path, index) => ({ path, index, area: pathArea(path) }))
+    .sort((a, b) => b.area - a.area)
+  return {
+    outerIndex: sorted[0].index,
+    outerPath: sorted[0].path,
+    innerIndices: sorted.slice(1).map((entry) => entry.index),
+    innerPaths: sorted.slice(1).map((entry) => entry.path)
+  }
+}
+
+function rectangleColor(index: number, outerIndex: number | null): string {
+  if (index === outerIndex) return RECTANGLE_COLORS[0]
+  return RECTANGLE_COLORS[(index % (RECTANGLE_COLORS.length - 1)) + 1]
+}
+
+function rectangleLabel(index: number, outerIndex: number | null, innerIndices: number[]): string {
+  if (index === outerIndex) return 'Outer'
+  const innerPosition = innerIndices.indexOf(index)
+  return innerPosition >= 0 ? `Inner ${innerPosition + 1}` : `Rectangle ${index + 1}`
 }
 
 export function App() {
   const [image, setImage] = useState<Loaded | null>(null)
-  const [tool, setTool] = useState<Tool>('pen-outer')
-  const [outerPath, setOuterPath] = useState<RectPath | null>(null)
-  const [innerPath, setInnerPath] = useState<RectPath | null>(null)
-  const [drafts, setDrafts] = useState<DraftState>({ outer: [], inner: [] })
+  const [tool, setTool] = useState<Tool>('pen-rectangle')
+  const [rectangles, setRectangles] = useState<RectPath[]>([])
+  const [activeRectangleIndex, setActiveRectangleIndex] = useState<number | null>(null)
+  const [draft, setDraft] = useState<Point[]>([])
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState('Open an image to begin')
   const [hideGuides, setHideGuides] = useState(false)
@@ -137,17 +203,17 @@ export function App() {
 
   const applyLoadedImage = useCallback((res: Loaded) => {
     setImage(res)
-    setOuterPath(null)
-    setInnerPath(null)
-    setDrafts({ outer: [], inner: [] })
-    setTool('pen-outer')
+    setRectangles([])
+    setActiveRectangleIndex(null)
+    setDraft([])
+    setTool('pen-rectangle')
     setShowMesh(false)
     setMeshColorIndex(0)
     setZoomLevel(1)
     setDewarpPreview(null)
     setDebugMessage('')
     refreshSavedDebugOutline(imageFilename(res.path))
-    setStatus('Outer Pen: click four outer corners in order around the paper')
+    setStatus('Add Rectangle: click four corners around the next rectangle')
   }, [refreshSavedDebugOutline])
 
   const handleOpen = useCallback(async () => {
@@ -195,78 +261,89 @@ export function App() {
     }
   }, [applyLoadedImage])
 
-  const pathForRole = useCallback((role: Role) => (role === 'outer' ? outerPath : innerPath), [innerPath, outerPath])
-
-  const setPathForRole = useCallback((role: Role, next: RectPath | null) => {
-    if (role === 'outer') setOuterPath(next)
-    else setInnerPath(next)
+  const setRectangleAt = useCallback((rectangleIndex: number, updater: (path: RectPath) => RectPath) => {
+    setRectangles((prev) => prev.map((path, index) => (index === rectangleIndex ? updater(path) : path)))
   }, [])
 
-  const handleResetPath = useCallback((role: Role) => {
-    setPathForRole(role, null)
-    setDrafts((prev) => ({ ...prev, [role]: [] }))
-    setTool(role === 'outer' ? 'pen-outer' : 'pen-inner')
+  const handleAddRectangle = useCallback(() => {
+    if (!image) return
+    setDraft([])
+    setActiveRectangleIndex(null)
+    setTool('pen-rectangle')
     setDewarpPreview(null)
-    setShowMesh(false)
-    setStatus(`${roleLabel(role)} path reset`)
-  }, [setPathForRole])
+    setStatus('Add Rectangle: click corner 1 of 4')
+  }, [image])
 
   const handleResetAll = useCallback(() => {
-    setOuterPath(null)
-    setInnerPath(null)
-    setDrafts({ outer: [], inner: [] })
+    setRectangles([])
+    setActiveRectangleIndex(null)
+    setDraft([])
     setDewarpPreview(null)
     setShowMesh(false)
-    setTool('pen-outer')
-    setStatus('Reset outer and inner rectangles')
+    setTool('pen-rectangle')
+    setStatus('Reset all rectangles')
   }, [])
 
-  const handleAppendCorner = useCallback((role: Role, point: Point) => {
-    if (pathForRole(role)) return
-    const next = [...drafts[role], point]
+  const handleAppendCorner = useCallback((point: Point) => {
+    const next = [...draft, point]
     if (next.length >= 4) {
-      setPathForRole(role, pathFromCorners(next))
-      setDrafts((prev) => ({ ...prev, [role]: [] }))
-      const nextRole: Role = role === 'outer' ? 'inner' : 'outer'
-      setTool(role === 'outer' ? 'pen-inner' : 'pen-outer')
-      setStatus(`${roleLabel(role)} path created. ${roleLabel(nextRole)} Pen is now active.`)
+      const path = pathFromCorners(next)
+      setRectangles((prev) => [...prev, path])
+      setActiveRectangleIndex(rectangles.length)
+      setDraft([])
+      setStatus('Rectangle created. Drag nodes, add side nodes, or press Add Rectangle for another.')
     } else {
-      setDrafts((prev) => ({ ...prev, [role]: next }))
-      setStatus(`${roleLabel(role)} Pen: click corner ${next.length + 1} of 4`)
+      setDraft(next)
+      setStatus(`Add Rectangle: click corner ${next.length + 1} of 4`)
     }
-  }, [drafts, pathForRole, setPathForRole])
+  }, [draft, rectangles.length])
 
-  const handleNodeChange = useCallback((role: Role, index: number, point: Point) => {
-    const setter = role === 'outer' ? setOuterPath : setInnerPath
-    setter((prev) => (prev ? movePathNode(prev, index, point) : prev))
+  const handleNodeChange = useCallback((rectangleIndex: number, nodeIndex: number, point: Point) => {
+    setRectangleAt(rectangleIndex, (path) => movePathNode(path, nodeIndex, point))
+    setActiveRectangleIndex(rectangleIndex)
     setDewarpPreview(null)
-  }, [])
+  }, [setRectangleAt])
 
-  const handleHandleChange = useCallback((role: Role, index: number, handle: Point) => {
-    const setter = role === 'outer' ? setOuterPath : setInnerPath
-    setter((prev) => (prev ? setPathHandle(prev, index, handle) : prev))
+  const handleHandleChange = useCallback((rectangleIndex: number, nodeIndex: number, handle: Point) => {
+    setRectangleAt(rectangleIndex, (path) => setPathHandle(path, nodeIndex, handle))
+    setActiveRectangleIndex(rectangleIndex)
     setDewarpPreview(null)
-  }, [])
+  }, [setRectangleAt])
 
-  const handleInsertNode = useCallback((role: Role, segmentIndex: number, node: BezierNode) => {
-    const setter = role === 'outer' ? setOuterPath : setInnerPath
-    setter((prev) => (prev ? insertPathNode(prev, segmentIndex, node) : prev))
+  const handleInsertNode = useCallback((rectangleIndex: number, segmentIndex: number, node: BezierNode) => {
+    setRectangleAt(rectangleIndex, (path) => insertPathNode(path, segmentIndex, node))
+    setActiveRectangleIndex(rectangleIndex)
     setDewarpPreview(null)
-    setStatus(`${roleLabel(role)} node added`)
-  }, [])
+    setStatus('Rectangle node added')
+  }, [setRectangleAt])
+
+  const handleDeleteNode = useCallback((rectangleIndex: number, nodeIndex: number) => {
+    const path = rectangles[rectangleIndex]
+    const node = path?.nodes[nodeIndex]
+    if (!path || !node) return
+    if (node.corner) {
+      setStatus('Corner nodes cannot be deleted')
+      return
+    }
+    setRectangleAt(rectangleIndex, (prevPath) => deletePathNode(prevPath, nodeIndex))
+    setActiveRectangleIndex(rectangleIndex)
+    setDewarpPreview(null)
+    setStatus('Rectangle node deleted')
+  }, [rectangles, setRectangleAt])
 
   const outerCornersOrStatus = useCallback((): Quad | null => {
+    const { outerPath } = deriveRectangles(rectangles)
     if (!outerPath) {
-      setStatus('Create the outer path first')
+      setStatus('Create at least one rectangle first')
       return null
     }
     const corners = pathCorners(outerPath)
     if (!corners) {
-      setStatus('Outer path does not have four corner nodes')
+      setStatus('Derived outer rectangle does not have four corner nodes')
       return null
     }
     return corners
-  }, [outerPath])
+  }, [rectangles])
 
   const handleExport = useCallback(async () => {
     if (!image) return
@@ -327,16 +404,16 @@ export function App() {
   }, [dewarpPreview, image, outerCornersOrStatus])
 
   const handleProjectMesh = useCallback(() => {
-    if (!outerPath || !innerPath) {
-      setStatus('Create both outer and inner paths before projecting the mesh')
+    if (rectangles.length < 2) {
+      setStatus('Create at least two rectangles before projecting the mesh')
       return
     }
     setShowMesh((visible) => {
       const next = !visible
-      setStatus(next ? 'Projected mesh using outer and inner paths' : 'Mesh hidden')
+      setStatus(next ? 'Projected mesh using all rectangles' : 'Mesh hidden')
       return next
     })
-  }, [innerPath, outerPath])
+  }, [rectangles.length])
 
   const handleSaveDebugOutlines = useCallback(() => {
     if (!image) return
@@ -344,13 +421,12 @@ export function App() {
     try {
       const store = readDebugOutlineStore()
       store[targetFilename] = {
-        version: 2,
+        version: 3,
         filename: targetFilename,
         savedAt: new Date().toISOString(),
         imageWidth: image.width,
         imageHeight: image.height,
-        outerPath,
-        innerPath
+        rectangles
       }
       writeDebugOutlineStore(store)
       refreshSavedDebugOutline(targetFilename)
@@ -361,7 +437,7 @@ export function App() {
       setDebugMessage(message)
       setStatus(message)
     }
-  }, [image, innerPath, outerPath, refreshSavedDebugOutline])
+  }, [image, rectangles, refreshSavedDebugOutline])
 
   const handleLoadDebugOutlines = useCallback(() => {
     if (!image) return
@@ -371,10 +447,10 @@ export function App() {
       setDebugMessage(`No saved paths for ${targetFilename}`)
       return
     }
-    setOuterPath(saved.outerPath)
-    setInnerPath(saved.innerPath)
-    setDrafts({ outer: [], inner: [] })
-    setTool('pen-outer')
+    setRectangles(saved.rectangles)
+    setDraft([])
+    setActiveRectangleIndex(saved.rectangles.length ? 0 : null)
+    setTool('pen-rectangle')
     setShowMesh(false)
     setDewarpPreview(null)
     refreshSavedDebugOutline(targetFilename)
@@ -424,18 +500,17 @@ export function App() {
         canvasRef.current?.zoomToActualSize()
       } else if (e.key === 'v' || e.key === ' ') {
         setTool('pan')
-      } else if (e.key === '1') {
-        setTool('pen-outer')
-      } else if (e.key === '2') {
-        setTool('pen-inner')
+      } else if (e.key === 'a') {
+        handleAddRectangle()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [image])
+  }, [handleAddRectangle, image])
 
-  const outerCorners = pathCorners(outerPath)
-  const hasAnyPath = Boolean(outerPath || innerPath || drafts.outer.length || drafts.inner.length)
+  const derivedRectangles = deriveRectangles(rectangles)
+  const outerCorners = pathCorners(derivedRectangles.outerPath)
+  const hasAnyPath = Boolean(rectangles.length || draft.length)
   const displayImage = dewarpPreview ?? image
   const dewarpActive = Boolean(dewarpPreview)
   const displayFilename = dewarpActive ? `${filename} preview` : filename
@@ -452,10 +527,11 @@ export function App() {
         </div>
         <span className="sep" />
         <div className="toolbar-group">
-          <ToolButton active={tool === 'pen-outer'} onClick={() => setTool('pen-outer')} title="Outer Pen (1)" color="#ff5e5e">Outer</ToolButton>
-          <ToolButton active={tool === 'pen-inner'} onClick={() => setTool('pen-inner')} title="Inner Pen (2)" color="#4ea1ff">Inner</ToolButton>
+          <ToolButton active={tool === 'pen-rectangle'} onClick={handleAddRectangle} disabled={!image} title="Add rectangle (A)" color="#4ea1ff">
+            Add Rectangle
+          </ToolButton>
           <ToolButton active={tool === 'pan'} onClick={() => setTool('pan')} title="Pan/move (V)">Pan</ToolButton>
-          <button onClick={handleResetAll} disabled={!hasAnyPath}>Reset</button>
+          <button onClick={handleResetAll} disabled={!hasAnyPath}>Reset All</button>
         </div>
         <span className="sep" />
         <div className="toolbar-group">
@@ -508,10 +584,9 @@ export function App() {
             imageWidth={displayImage.width}
             imageHeight={displayImage.height}
             tool={dewarpActive ? 'pan' : tool}
-            outerPath={dewarpActive ? null : outerPath}
-            innerPath={dewarpActive ? null : innerPath}
-            outerDraft={dewarpActive ? [] : drafts.outer}
-            innerDraft={dewarpActive ? [] : drafts.inner}
+            rectangles={dewarpActive ? [] : rectangles}
+            draft={dewarpActive ? [] : draft}
+            activeRectangleIndex={dewarpActive ? null : activeRectangleIndex}
             hideGuides={hideGuides}
             showMesh={meshVisibleInCanvas}
             meshDivisions={meshDivisions}
@@ -521,6 +596,8 @@ export function App() {
             onNodeChange={handleNodeChange}
             onHandleChange={handleHandleChange}
             onInsertNode={handleInsertNode}
+            onDeleteNode={handleDeleteNode}
+            onActivateRectangle={setActiveRectangleIndex}
           />
         ) : (
           <div className="empty-state">Open an image to begin</div>
@@ -533,17 +610,28 @@ export function App() {
           <div style={{ color: '#ccc' }}>
             {dewarpActive && 'Dewarp preview - press Dewarp again to return to the original image'}
             {!dewarpActive && tool === 'pan' && 'Pan - drag empty canvas to move the view'}
-            {!dewarpActive && tool === 'pen-outer' && 'Outer Pen - mark/edit the paper perimeter'}
-            {!dewarpActive && tool === 'pen-inner' && 'Inner Pen - mark/edit the print perimeter'}
+            {!dewarpActive && tool === 'pen-rectangle' && (draft.length ? `Add Rectangle - click corner ${draft.length + 1} of 4` : 'Rectangle tool - edit active rectangle or press Add Rectangle for a new one')}
           </div>
         </section>
         <section>
-          <h3>Manual paths</h3>
-          <PathRow label="Outer" color="#ff5e5e" path={outerPath} draftCount={drafts.outer.length} />
-          <PathRow label="Inner" color="#4ea1ff" path={innerPath} draftCount={drafts.inner.length} />
+          <h3>Rectangles</h3>
+          {rectangles.length === 0 && !draft.length && (
+            <div style={{ color: '#666' }}>none</div>
+          )}
+          {rectangles.map((path, index) => (
+            <PathRow
+              key={index}
+              label={rectangleLabel(index, derivedRectangles.outerIndex, derivedRectangles.innerIndices)}
+              color={rectangleColor(index, derivedRectangles.outerIndex)}
+              path={path}
+              draftCount={0}
+              active={activeRectangleIndex === index}
+            />
+          ))}
+          {draft.length > 0 && (
+            <PathRow label="Draft" color="#4ea1ff" path={null} draftCount={draft.length} active />
+          )}
           <div className="path-actions">
-            <button onClick={() => handleResetPath('outer')} disabled={!outerPath && drafts.outer.length === 0}>Reset Outer</button>
-            <button onClick={() => handleResetPath('inner')} disabled={!innerPath && drafts.inner.length === 0}>Reset Inner</button>
             <ToolButton active={hideGuides} onClick={() => setHideGuides((hidden) => !hidden)} title="Hide node handles">
               Hide Handles
             </ToolButton>
@@ -589,13 +677,13 @@ export function App() {
             } as React.CSSProperties & Record<'--slider-color' | '--slider-fill', string>}
           />
           <div style={{ color: '#888', fontSize: 11, marginTop: 6 }}>
-            Mesh is projected from both rectangles. The outer path anchors the boundary; the inner path constrains the interior.
+            Mesh derives the largest rectangle as outer and uses every smaller rectangle as a smooth interior constraint.
           </div>
         </section>
         <section>
           <h3>Shortcuts</h3>
           <div style={{ color: '#888', lineHeight: 1.5 }}>
-            1 Outer Pen, 2 Inner Pen, V or Space Pan. <br />
+            A Add Rectangle, V or Space Pan. <br />
             Cmd+0 fit, Cmd+1 100%.
           </div>
         </section>
@@ -607,13 +695,13 @@ export function App() {
           </div>
           <div className="debug-row">
             <span>Current</span>
-            <b>{outerPath?.nodes.length ?? 0} outer / {innerPath?.nodes.length ?? 0} inner</b>
+            <b>{rectangles.length} rectangles</b>
           </div>
           <div className="debug-row">
             <span>Saved</span>
             <b>
               {savedDebugOutline
-                ? `${savedDebugOutline.outerNodes} outer / ${savedDebugOutline.innerNodes} inner`
+                ? `${savedDebugOutline.rectangleNodes.length} rectangles`
                 : 'None'}
             </b>
           </div>
@@ -631,7 +719,7 @@ export function App() {
           )}
           {debugMessage && <div className="debug-message">{debugMessage}</div>}
           <div className="debug-actions">
-            <button onClick={handleSaveDebugOutlines} disabled={!image || !hasAnyPath}>Save</button>
+            <button onClick={handleSaveDebugOutlines} disabled={!image || rectangles.length === 0}>Save</button>
             <button onClick={handleLoadDebugOutlines} disabled={!image || !savedDebugOutline}>Load</button>
             <button onClick={handleDeleteDebugOutlines} disabled={!image || !savedDebugOutline}>Delete</button>
           </div>
@@ -678,17 +766,19 @@ function PathRow({
   label,
   color,
   path,
-  draftCount
+  draftCount,
+  active = false
 }: {
   label: string
   color: string
   path: RectPath | null
   draftCount: number
+  active?: boolean
 }) {
   const text = path ? `${path.nodes.length} nodes` : draftCount ? `${draftCount}/4 corners` : 'not started'
   return (
     <div className="row">
-      <label>{label}</label>
+      <label>{active ? `${label} *` : label}</label>
       <span style={{ color: path || draftCount ? color : '#666' }}>{text}</span>
     </div>
   )
