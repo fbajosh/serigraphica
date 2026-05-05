@@ -227,7 +227,59 @@ The future dewarp should assume paper bends smoothly. It should not introduce sh
 6. Replace perspective-only dewarp preview/export with mesh-based resampling using both paths.
 7. Add crop/result comparison controls for dewarp review.
 
+Build a plan for this:
+1. Fix dewarp issues:
+ - Dewarp should not rotate the image
+ - Dewarp seems to undervalue the inner rectangles - I explained this several times: each drawn drawn is a slice of the actual square shape. So the mesh needs to interpolate between the points so that the line hits both meshes, not using the inner mesh as a "guide" - these are fixed positions that the user enters, and they are physically connected by paper so the transition is smooth between them. 
+ - Adding to this, the mesh lines can never overlap. The slices are concentric - As I have explained before and in 2 above, the lines cannot ever cross. I am not sure why this is happenening - I need you take a deep look into the algorithm and make sure it (and you) truly understand the nature of the rectangles, as explained above in 2, that they represent fixed points in space and cannot overlap
+ - It appears that we get overlapping/swirling grids if the rectangles are not drawn the same direction (clockwise vs CCW) - this should not be happening. The program should resolve the drawn lines by their location, not their order of placement
+2. Have Mesh default to show once the first rectangle is drawn. Change the button to Hide Mesh / Show Mesh
+3. Load saved paths by default when opening an image. remove Load button from right bar, remove Delete button altogether, and move Save to the top bar (Add Reset Save). Remove Pan from the top bar - have Add swap to Pan when Add is active so the user can go back to Pan mode that way
+4. Is it possible to cancel dewarp if you click on Dewarping... button? This is useful if you click dewarp but realize that you need to change the grid
+5. Allow max zoom to be twice as much as it currently is
+6. New feature: Fill
+ - use https://github.com/advimman/lama
+ - the uploaded image is a photograph of a serigraph, which is silkscreen ink on canvas paper. that paper is clipped to a board on an easel, so the user highlights in the image where there are clips/clamps/shadows to remove
+ - the fill replaces those clips/clamps/shadows, which will always be against the edge of the image, so one side will be end the image while the other 3 sides will be surrounded by the textured off-white canvas. The clips are also white but have shadows. 
+ - add the controls for this to right panel: similar to the rectangles, the user draws borders. so section named Fill, buttons for Add, Reset, Fill. User clicks add, draws 4-sided shape (right click deletes points, no protected corners, no warping or bezier handles), once the four points are placed, clicking again starts another shape. there can be unlimited shapes but they cannot overlap. Reset removes the shapes. Fill runs the fill program. Fill changes to Unfill after being run, and the user can remove the fill. If the user moves points or adds or removes shapes, Unfill becomes Refill and it runs the fill again
+ - this could be done before or after the dewarp, since they're independent of each other. I think for all and intents and purposes, we would do it before the dewarp - makes the UI easier
 
-Next:
-1. Have dewarp button dynamically go between two widths: 1 "Dewarp" and 2 "Dewarping...NN%"
-2. swap Pan and Reset
+ Plan:
+ **Implementation Plan**
+1. **Dewarp correctness first**
+   - Remove the current “soft guide” behavior for inner rectangles. Every drawn rectangle becomes a hard constraint: its four edges must map exactly to straight target edges.
+   - Normalize every rectangle by location, not drawing order: sort corners/edges into top/right/bottom/left relative to the outer rectangle frame, so clockwise vs CCW drawing cannot create swirling.
+   - Preserve output orientation from the image-space outer rectangle. Dewarp should not rotate based on start point, winding, or longest side.
+   - Replace weighted TPS-style interpolation with a nested-ring mesh: largest rectangle is outer, smaller rectangles are ordered by area, and each band between consecutive rectangles is interpolated smoothly between corresponding sides.
+   - Add foldover checks: generated mesh cells must keep consistent signed area. If any grid cell crosses/overlaps, fail visibly instead of exporting a bad warp.
+
+2. **Mesh behavior/UI**
+   - Mesh defaults visible once the first rectangle is completed.
+   - Change Mesh button label to `Hide Mesh` / `Show Mesh`.
+   - Clicking `Mesh` during dewarp preview exits preview and returns to the mesh view.
+   - Dewarp button gets two width states: compact for `Dewarp`, wider only while showing `Dewarping...NN%`.
+
+3. **Saved paths/top bar**
+   - Auto-load saved paths when opening an image by filename.
+   - Remove `Load` and `Delete` from the right panel.
+   - Move `Save` to the top bar near `Add` / `Reset`.
+   - Remove separate `Pan` button. The `Add` button toggles: when Add mode is active, it becomes `Pan`; otherwise it shows `Add`.
+   - Keep saved debug/status info visible in the right panel, without controls.
+
+4. **Cancelable dewarp**
+   - Make the `Dewarping...NN%` button clickable.
+   - First implementation should cancel by killing/restarting the Python sidecar during active dewarp. That is reliable because dewarp is currently a blocking CPU operation.
+
+5. **Zoom**
+   - Find the current max zoom clamp in `Canvas`.
+   - Double it and ensure wheel zoom, trackpad zoom, and any programmatic zoom all share the same limit.
+
+6. **Fill feature**
+   - Add Fill shapes as simple 4-point polygons: no bezier handles, no protected corners, right-click deletes points.
+   - Right panel section: `Fill` with `Add`, `Reset`, and `Fill` / `Unfill` / `Refill`.
+   - Unlimited fill shapes, with polygon overlap validation.
+   - Fill runs before dewarp and produces a same-size filled image preview; rectangles remain valid because coordinates do not change.
+   - Dewarp/export use the filled image if Fill is active.
+   - Integrate LaMa as a separate Python/model dependency path, not mixed directly into the current OpenCV sidecar venv. The LaMa repo expects image/mask file pairs and runs prediction via `bin/predict.py` with a model path, input dir, and output dir: https://github.com/advimman/lama
+
+I would do this in that order. The dewarp algorithm needs to be corrected before Fill, because Fill should plug into a stable image pipeline rather than becoming another variable while the mesh math is still wrong.
