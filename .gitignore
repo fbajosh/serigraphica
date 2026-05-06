@@ -6,6 +6,10 @@ out/
 .DS_Store
 *.log
 
+# Local planning notes
+prd.md
+plan.md
+
 # Python
 python/.venv/
 __pycache__/
