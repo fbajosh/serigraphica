@@ -12,7 +12,6 @@ type Loaded = {
 
 const DEBUG_OUTLINES_KEY = 'serigraphica.manualOutlines.v3'
 const LEGACY_DEBUG_OUTLINES_KEY = 'serigraphica.manualOutlines.v2'
-const MESH_COLORS = ['inverse', '#ffffff', '#ff4d4d', '#ffd84d', '#5ee05e', '#4de8ff', '#4d79ff', '#ff5cff', '#000000'] as const
 const RECTANGLE_COLORS = ['#ff5e5e', '#4ea1ff', '#4de8ff', '#5ee05e', '#ffd84d', '#ff5cff'] as const
 
 type SavedManualOutline = {
@@ -230,7 +229,6 @@ export function App() {
   const [hideGuides, setHideGuides] = useState(false)
   const [showMesh, setShowMesh] = useState(false)
   const [meshDivisions, setMeshDivisions] = useState(10)
-  const [meshColorIndex, setMeshColorIndex] = useState(0)
   const [zoomLevel, setZoomLevel] = useState(1)
   const [dewarpPreview, setDewarpPreview] = useState<Loaded | null>(null)
   const [dewarpProgress, setDewarpProgress] = useState<DewarpProgress | null>(null)
@@ -260,7 +258,6 @@ export function App() {
     setFillDirty(false)
     setTool('pen-rectangle')
     setShowMesh(savedRectangles.length > 0)
-    setMeshColorIndex(0)
     setZoomLevel(1)
     setDewarpPreview(null)
     const sizeWarning = saved && (saved.imageWidth !== res.width || saved.imageHeight !== res.height)
@@ -709,7 +706,6 @@ export function App() {
   const dewarpActive = Boolean(dewarpPreview)
   const activeFilledImage = dewarpActive && filledImage && !fillDirty ? filledImage : null
   const displayImage = activeFilledImage ?? dewarpPreview ?? image
-  const displayFilename = dewarpActive ? `${filename} preview` : filename
   const meshVisibleInCanvas = showMesh && !dewarpActive
   const fillOverlayVisible = dewarpActive && !activeFilledImage
   const fillButtonLabel = filledImage ? (fillDirty ? 'Refill' : 'Unfill') : 'Fill'
@@ -763,7 +759,7 @@ export function App() {
             hideGuides={hideGuides}
             showMesh={meshVisibleInCanvas}
             meshDivisions={meshDivisions}
-            meshColor={MESH_COLORS[meshColorIndex]}
+            meshColor="inverse"
             onViewChange={setZoomLevel}
             onAppendCorner={handleAppendCorner}
             onNodeChange={handleNodeChange}
