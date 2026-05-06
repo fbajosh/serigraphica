@@ -725,7 +725,6 @@ export function App() {
     <div className="app">
       <div className="app-titlebar">
         <div className="app-title">Serigraphica</div>
-        <div className="titlebar-status">{status}</div>
       </div>
 
       <div
@@ -901,6 +900,7 @@ export function App() {
         </section>
       </div>
 
+      <div className="status-message">{status}</div>
     </div>
   )
 }

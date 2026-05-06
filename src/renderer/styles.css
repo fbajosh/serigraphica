@@ -32,6 +32,7 @@ button:hover { background: #333; }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .app {
+  position: relative;
   display: grid;
   grid-template-rows: 38px 1fr;
   grid-template-columns: 1fr 280px;
@@ -59,11 +60,14 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   pointer-events: none;
 }
 
-.titlebar-status {
+.status-message {
   position: absolute;
   right: 12px;
-  max-width: min(420px, 38vw);
+  bottom: 10px;
+  z-index: 20;
+  max-width: min(520px, calc(100vw - 24px));
   overflow: hidden;
+  padding: 5px 8px;
   color: #888;
   font-size: 11px;
   text-overflow: ellipsis;
