@@ -20,6 +20,7 @@ PARALLEL_RAIL_WEIGHT = 0.14
 Point = tuple[float, float]
 ProgressCallback = Callable[[float, str], None]
 BOUNDARY_SAMPLE_COUNT = 513
+FILL_FEATHER_RADIUS = 18
 
 
 def _emit_progress(progress: ProgressCallback | None, percent: float, stage: str) -> None:
@@ -764,10 +765,15 @@ def _fill_mask_from_shapes(shape: tuple[int, int], fill_shapes: list[dict]) -> n
         pts[:, 0] = np.clip(pts[:, 0], 0, w - 1)
         pts[:, 1] = np.clip(pts[:, 1], 0, h - 1)
         cv2.fillPoly(mask, [np.round(pts).astype(np.int32)], 255)
-    if np.any(mask):
-        kernel = np.ones((5, 5), dtype=np.uint8)
-        mask = cv2.dilate(mask, kernel, iterations=1)
     return mask
+
+
+def _expanded_fill_mask(mask: np.ndarray, radius: int = FILL_FEATHER_RADIUS) -> np.ndarray:
+    if not np.any(mask):
+        return mask
+    size = radius * 2 + 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+    return cv2.dilate(mask, kernel, iterations=1)
 
 
 def _sample_mask_from_regions(shape: tuple[int, int], sample_regions: list[dict], fill_mask: np.ndarray) -> np.ndarray:
@@ -817,33 +823,126 @@ def _best_sample_patch(sample_img: np.ndarray, sample_mask: np.ndarray, bbox: tu
     return tiled[:bh, :bw].copy()
 
 
-def _fill_with_sample_texture(img: np.ndarray, mask: np.ndarray, sample_regions: list[dict]) -> np.ndarray | None:
-    sample_mask = _sample_mask_from_regions(img.shape[:2], sample_regions, mask)
+def _local_ring_mask(labels: np.ndarray, label: int, fill_mask: np.ndarray, bbox: tuple[int, int, int, int]) -> tuple[np.ndarray, tuple[int, int]] | None:
+    x, y, bw, bh = bbox
+    h, w = labels.shape[:2]
+    pad = int(max(32, min(220, max(bw, bh) * 1.25)))
+    x0 = max(0, x - pad)
+    y0 = max(0, y - pad)
+    x1 = min(w, x + bw + pad)
+    y1 = min(h, y + bh + pad)
+    component = (labels[y0:y1, x0:x1] == label).astype(np.uint8) * 255
+    if not np.any(component):
+        return None
+
+    for radius in (21, 41, 81, 121):
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius, radius))
+        ring = cv2.dilate(component, kernel, iterations=1)
+        ring[component > 0] = 0
+        ring[fill_mask[y0:y1, x0:x1] > 0] = 0
+        if np.count_nonzero(ring) >= 160:
+            return ring, (x0, y0)
+    return None
+
+
+def _lab_pixels(img: np.ndarray, selector: np.ndarray) -> np.ndarray | None:
+    pixels = img[selector]
+    if pixels.shape[0] < 16:
+        return None
+    return cv2.cvtColor(pixels.reshape(-1, 1, 3), cv2.COLOR_BGR2LAB).reshape(-1, 3).astype(np.float32)
+
+
+def _match_patch_to_local_paper(
+    img: np.ndarray,
+    patch: np.ndarray,
+    component: np.ndarray,
+    labels: np.ndarray,
+    label: int,
+    fill_mask: np.ndarray,
+    bbox: tuple[int, int, int, int],
+) -> np.ndarray:
+    ring_info = _local_ring_mask(labels, label, fill_mask, bbox)
+    if ring_info is None:
+        return patch
+
+    ring_mask, (x0, y0) = ring_info
+    ring_img = img[y0:y0 + ring_mask.shape[0], x0:x0 + ring_mask.shape[1]]
+    target_lab = _lab_pixels(ring_img, ring_mask > 0)
+    source_lab = _lab_pixels(patch, component)
+    if target_lab is None or source_lab is None:
+        return patch
+
+    source_mean = source_lab.mean(axis=0)
+    target_mean = target_lab.mean(axis=0)
+    source_std = source_lab.std(axis=0)
+    target_std = target_lab.std(axis=0)
+    std_ratio = np.clip(target_std / np.maximum(source_std, 1.0), 0.82, 1.18)
+
+    patch_lab = cv2.cvtColor(patch, cv2.COLOR_BGR2LAB).astype(np.float32)
+    adjusted_lab = (patch_lab - source_mean[None, None, :]) * std_ratio[None, None, :] + target_mean[None, None, :]
+    adjusted_lab = np.clip(adjusted_lab, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(adjusted_lab, cv2.COLOR_LAB2BGR)
+
+
+def _composite_patch_with_feather(target: np.ndarray, patch: np.ndarray, core: np.ndarray, expanded: np.ndarray) -> None:
+    core_mask = core.astype(np.uint8)
+    expanded_mask = expanded.astype(np.uint8)
+    if not np.any(core_mask) or not np.any(expanded_mask):
+        return
+
+    h, w = expanded_mask.shape[:2]
+    feather_radius = float(max(5, min(24, max(h, w) * 0.08, FILL_FEATHER_RADIUS)))
+    distance = cv2.distanceTransform(expanded_mask, cv2.DIST_L2, 5)
+    alpha = np.clip(distance / feather_radius, 0.0, 1.0)
+    alpha = alpha * alpha * (3.0 - 2.0 * alpha)
+    alpha = cv2.GaussianBlur(alpha, (0, 0), feather_radius / 3)
+    alpha[core] = 1.0
+    alpha[~expanded] = 0.0
+
+    alpha3 = alpha[:, :, None].astype(np.float32)
+    blended = patch.astype(np.float32) * alpha3 + target.astype(np.float32) * (1.0 - alpha3)
+    target[expanded] = np.clip(blended, 0, 255).astype(np.uint8)[expanded]
+
+
+def _fill_with_sample_texture(img: np.ndarray, core_mask: np.ndarray, expanded_mask: np.ndarray, sample_regions: list[dict]) -> np.ndarray | None:
+    sample_mask = _sample_mask_from_regions(img.shape[:2], sample_regions, expanded_mask)
     if np.count_nonzero(sample_mask) < 256:
         return None
 
     result = img.copy()
-    component_count, labels, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), 8)
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats((core_mask > 0).astype(np.uint8), 8)
     used = False
     for label in range(1, component_count):
         x, y, bw, bh, area = stats[label]
         if area <= 0:
             continue
-        patch = _best_sample_patch(result, sample_mask, (int(x), int(y), int(bw), int(bh)))
+        pad = FILL_FEATHER_RADIUS
+        x0 = max(0, int(x) - pad)
+        y0 = max(0, int(y) - pad)
+        x1 = min(img.shape[1], int(x + bw) + pad)
+        y1 = min(img.shape[0], int(y + bh) + pad)
+        patch = _best_sample_patch(result, sample_mask, (x0, y0, x1 - x0, y1 - y0))
         if patch is None:
             continue
-        component = (labels[y:y + bh, x:x + bw] == label)
-        target = result[y:y + bh, x:x + bw]
-        target[component] = patch[component]
+        component = (labels[y0:y1, x0:x1] == label)
+        size = FILL_FEATHER_RADIUS * 2 + 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+        expanded_component = cv2.dilate(component.astype(np.uint8) * 255, kernel, iterations=1) > 0
+        patch = _match_patch_to_local_paper(
+            img,
+            patch,
+            component,
+            labels,
+            label,
+            expanded_mask,
+            (x0, y0, x1 - x0, y1 - y0),
+        )
+        target = result[y0:y1, x0:x1]
+        _composite_patch_with_feather(target, patch, component, expanded_component)
         used = True
 
     if not used:
         return None
-
-    seam_kernel = np.ones((3, 3), dtype=np.uint8)
-    inner_edge = cv2.subtract(mask, cv2.erode(mask, seam_kernel, iterations=2))
-    if np.any(inner_edge):
-        result = cv2.inpaint(result, inner_edge, 2, cv2.INPAINT_TELEA)
     return result
 
 
@@ -926,21 +1025,22 @@ def export_filled(
         raise RuntimeError("at least one fill shape is required")
 
     h, w = img.shape[:2]
-    mask = _fill_mask_from_shapes((h, w), fill_shapes)
-    if not np.any(mask):
+    core_mask = _fill_mask_from_shapes((h, w), fill_shapes)
+    if not np.any(core_mask):
         raise RuntimeError("fill mask is empty")
+    expanded_mask = _expanded_fill_mask(core_mask)
 
     method = "opencv-inpaint"
     try:
-        result = _inpaint_with_lama_onnx(img, mask, model_path or "")
+        result = _inpaint_with_lama_onnx(img, core_mask, model_path or "")
         method = "lama-onnx-crop"
     except Exception:
-        sampled = _fill_with_sample_texture(img, mask, sample_regions or [])
+        sampled = _fill_with_sample_texture(img, core_mask, expanded_mask, sample_regions or [])
         if sampled is not None:
             result = sampled
             method = "sample-texture"
         else:
-            result = cv2.inpaint(img, mask, 5, cv2.INPAINT_TELEA)
+            result = cv2.inpaint(img, expanded_mask, 5, cv2.INPAINT_TELEA)
 
     ok = _write_image(output_path, result, quality)
     if not ok:

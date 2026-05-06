@@ -713,6 +713,7 @@ export function App() {
   const meshVisibleInCanvas = showMesh && !dewarpActive
   const fillOverlayVisible = dewarpActive && !activeFilledImage
   const fillButtonLabel = filledImage ? (fillDirty ? 'Refill' : 'Unfill') : 'Fill'
+  const fillActionEnabled = !busy && ((filledImage && !fillDirty) || (dewarpActive && fillShapes.length > 0))
   const dewarpButtonLabel = dewarpProgress
     ? `Dewarping...${Math.round(Math.max(0, Math.min(100, dewarpProgress.percent)))}%`
     : 'Dewarp'
@@ -720,38 +721,9 @@ export function App() {
 
   return (
     <div className="app">
-      <div className="main-toolbar">
-        <div className="toolbar-group">
-          <button onClick={handleOpen} disabled={busy}>Open</button>
-        </div>
-        <span className="sep" />
-        <div className="toolbar-group">
-          <ToolButton active={tool === 'pen-rectangle'} onClick={handleDrawMode} disabled={!image} title="Draw rectangles">
-            Draw
-          </ToolButton>
-          <ToolButton active={tool === 'pan'} onClick={handlePanMode} disabled={!image} title="Pan/move">
-            Pan
-          </ToolButton>
-          <button onClick={handleSaveDebugOutlines} disabled={!image || rectangles.length === 0}>Save</button>
-        </div>
-        <span className="sep" />
-        <div className="toolbar-group">
-          <ToolButton active={dewarpActive} onClick={handleDewarp} disabled={!image || rectangles.length < 2 || (busy && !dewarpProgress)} title="Toggle dewarp preview" className={dewarpButtonClass}>
-            {dewarpButtonLabel}
-          </ToolButton>
-        </div>
-        <span className="sep" />
-        <div className="toolbar-group">
-          <button onClick={handleExport} disabled={busy || !image || !outerCorners}>Export</button>
-          <button onClick={handleExportAs} disabled={busy || !image || !outerCorners}>Export As</button>
-        </div>
-      </div>
-
-      <div className="view-toolbar">
-        <p>Zoom</p>
-        <span className="view-pill">{Math.round(zoomLevel * 100)}%</span>
-        <button onClick={() => canvasRef.current?.fitToView()} disabled={!image}>Fit</button>
-        <button onClick={() => canvasRef.current?.zoomToActualSize()} disabled={!image}>100%</button>
+      <div className="app-titlebar">
+        <div className="app-title">Serigraphica</div>
+        <div className="titlebar-status">{status}</div>
       </div>
 
       <div
@@ -810,36 +782,55 @@ export function App() {
       </div>
 
       <div className="panel">
-        <section>
-          <h3>Active tool</h3>
-          <div style={{ color: '#ccc' }}>
-            {dewarpActive && tool !== 'fill' && 'Dewarp preview - press Dewarp again to return to the original image'}
-            {dewarpActive && tool === 'fill' && (fillDraft.length ? `Fill - click point ${fillDraft.length + 1} of 4` : 'Fill - click four points around clips, clamps, or shadows')}
-            {!dewarpActive && tool === 'pan' && 'Pan - drag empty canvas to move the view'}
-            {!dewarpActive && tool === 'pen-rectangle' && (draft.length ? `Draw - click corner ${draft.length + 1} of 4` : 'Draw - click empty canvas to start a rectangle, or edit existing nodes/edges')}
+        <section className="panel-workflow-section">
+          <h3>File</h3>
+          <div className="path-actions file-actions">
+            <button onClick={handleOpen} disabled={busy}>Open</button>
+            <input className="filename-input" type="text" value={filename || 'No image'} readOnly />
           </div>
         </section>
-        <section>
-          <h3>Guides</h3>
-          {rectangles.length === 0 && !draft.length && (
-            <div style={{ color: '#666' }}>none</div>
-          )}
-          {rectangles.map((path, index) => (
-            <PathRow
-              key={index}
-              label={rectangleLabel(index, derivedRectangles.outerIndex, derivedRectangles.innerIndices)}
-              color={rectangleColor(index, derivedRectangles.outerIndex)}
-              path={path}
-              draftCount={0}
-              active={activeRectangleIndex === index}
-              onDelete={() => handleDeleteRectangle(index)}
-            />
-          ))}
-          {draft.length > 0 && (
-            <PathRow label="Draft" color="#4ea1ff" path={null} draftCount={draft.length} active />
-          )}
+        <section className="panel-workflow-section">
+          <h3>Window</h3>
           <div className="path-actions">
+            <span className="view-pill">{Math.round(zoomLevel * 100)}%</span>
+            <button onClick={() => canvasRef.current?.fitToView()} disabled={!image}>Fit</button>
+            <button onClick={() => canvasRef.current?.zoomToActualSize()} disabled={!image}>100%</button>
+          </div>
+        </section>
+        <section className="panel-workflow-section">
+          <h3>Guides</h3>
+          <div className="path-actions guide-tool-actions">
+            <ToolButton active={tool === 'pen-rectangle'} onClick={handleDrawMode} disabled={!image} title="Draw rectangles">
+              Draw
+            </ToolButton>
+            <ToolButton active={tool === 'pan'} onClick={handlePanMode} disabled={!image} title="Pan/move">
+              Pan
+            </ToolButton>
+          </div>
+          <div className="rectangle-list-box">
+            {rectangles.length === 0 && !draft.length && (
+              <div className="rectangle-list-empty">none</div>
+            )}
+            {rectangles.map((path, index) => (
+              <PathRow
+                key={index}
+                label={rectangleLabel(index, derivedRectangles.outerIndex, derivedRectangles.innerIndices)}
+                color={rectangleColor(index, derivedRectangles.outerIndex)}
+                path={path}
+                draftCount={0}
+                active={activeRectangleIndex === index}
+                onDelete={() => handleDeleteRectangle(index)}
+              />
+            ))}
+            {draft.length > 0 && (
+              <PathRow label="Draft" color="#4ea1ff" path={null} draftCount={draft.length} active />
+            )}
+          </div>
+          <div className="path-actions guide-line-actions">
             <button onClick={handleResetAll} disabled={!hasAnyPath}>Reset Lines</button>
+            <button onClick={handleSaveDebugOutlines} disabled={!image || rectangles.length === 0}>Save Lines</button>
+          </div>
+          <div className="path-actions guide-display-actions">
             <ToolButton active={showMesh} onClick={handleProjectMesh} title="Project mesh using both rectangles">
               {showMesh ? 'Hide Mesh' : 'Show Mesh'}
             </ToolButton>
@@ -848,14 +839,8 @@ export function App() {
             </ToolButton>
           </div>
         </section>
-        <section>
+        <section className="panel-workflow-section">
           <h3>Mesh</h3>
-          <div className="row">
-            <label>State</label>
-            <span style={{ color: meshVisibleInCanvas ? '#88ffcd' : '#666' }}>
-              {meshVisibleInCanvas ? 'visible' : dewarpActive && showMesh ? 'hidden in preview' : 'hidden'}
-            </span>
-          </div>
           <div className="row">
             <label>Density</label>
             <span>{meshDivisions}x{meshDivisions}</span>
@@ -868,16 +853,12 @@ export function App() {
             onChange={(e) => setMeshDivisions(Number(e.target.value))}
             style={{ width: '100%' }}
           />
-
+          <ToolButton active={dewarpActive} onClick={handleDewarp} disabled={!image || rectangles.length < 2 || (busy && !dewarpProgress)} title="Toggle dewarp preview" className={`${dewarpButtonClass} mesh-dewarp-button`}>
+            {dewarpButtonLabel}
+          </ToolButton>
         </section>
-        <section>
+        <section className="panel-workflow-section">
           <h3>Fill</h3>
-          <div className="row">
-            <label>State</label>
-            <span style={{ color: activeFilledImage || (!dewarpActive && filledImage) ? '#88ffcd' : fillDirty ? '#f4d35e' : '#666' }}>
-              {!dewarpActive ? (filledImage ? 'filled hidden' : 'dewarp first') : activeFilledImage ? 'filled' : fillDirty ? 'needs refill' : 'not filled'}
-            </span>
-          </div>
           <div className="row">
             <label>Shapes</label>
             <span>{fillShapes.length}{fillDraft.length ? ` + ${fillDraft.length}/4 draft` : ''}</span>
@@ -887,49 +868,24 @@ export function App() {
               Add
             </ToolButton>
             <button onClick={handleResetFill} disabled={!fillShapes.length && !fillDraft.length && !filledImage}>Reset</button>
-            <button onClick={handleFillAction} disabled={busy || (filledImage && !fillDirty ? false : (!dewarpActive || fillShapes.length === 0))}>
+            <button
+              className={fillActionEnabled ? 'fill-run-button fill-run-button--enabled' : 'fill-run-button'}
+              onClick={handleFillAction}
+              disabled={!fillActionEnabled}
+            >
               {fillButtonLabel}
             </button>
           </div>
-          <div className="panel-note">
-            Dewarp first, then draw four-point masks around clips, clamps, or shadows.
-          </div>
         </section>
-        <section className="debug-section">
-          <h3>File info</h3>
-          <div className="debug-row">
-            <span>Filename</span>
-            <b>{filename || 'No image'}</b>
+        <section className="panel-workflow-section">
+          <h3>Export</h3>
+          <div className="path-actions export-actions">
+            <button onClick={handleExport} disabled={busy || !image || !outerCorners}>Export</button>
+            <button onClick={handleExportAs} disabled={busy || !image || !outerCorners}>Export As</button>
           </div>
-          <div className="debug-row">
-            <span>Current</span>
-            <b>{rectangles.length} rectangles</b>
-          </div>
-          <div className="debug-row">
-            <span>Saved</span>
-            <b>
-              {savedDebugOutline
-                ? `${savedDebugOutline.rectangleNodes.length} rectangles`
-                : 'None'}
-            </b>
-          </div>
-          {savedDebugOutline && (
-            <>
-              <div className="debug-row">
-                <span>Saved at</span>
-                <b>{new Date(savedDebugOutline.savedAt).toLocaleString()}</b>
-              </div>
-              <div className="debug-row">
-                <span>Size</span>
-                <b>{savedDebugOutline.imageWidth}x{savedDebugOutline.imageHeight}</b>
-              </div>
-            </>
-          )}
-          {debugMessage && <div className="debug-message">{debugMessage}</div>}
         </section>
       </div>
 
-      <div className="statusbar">{status}</div>
     </div>
   )
 }
