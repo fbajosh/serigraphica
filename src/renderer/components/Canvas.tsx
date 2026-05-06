@@ -43,6 +43,7 @@ type Props = {
   hideGuides: boolean
   showMesh: boolean
   meshDivisions: number
+  meshCurve: number
   meshColor: string
   onViewChange: (zoom: number) => void
   onAppendCorner: (point: Point) => void
@@ -151,6 +152,23 @@ function lerp(a: Point, b: Point, t: number): Point {
   return [
     a[0] * (1 - t) + b[0] * t,
     a[1] * (1 - t) + b[1] * t
+  ]
+}
+
+function meshCurveStrength(value: number): number {
+  return Math.max(0, Math.min(1, value / 100))
+}
+
+function cubicHermitePoint(p0: Point, m0: Point, p1: Point, m1: Point, t: number): Point {
+  const t2 = t * t
+  const t3 = t2 * t
+  const h00 = 2 * t3 - 3 * t2 + 1
+  const h10 = t3 - 2 * t2 + t
+  const h01 = -2 * t3 + 3 * t2
+  const h11 = t3 - t2
+  return [
+    p0[0] * h00 + m0[0] * h10 + p1[0] * h01 + m1[0] * h11,
+    p0[1] * h00 + m0[1] * h10 + p1[1] * h01 + m1[1] * h11
   ]
 }
 
@@ -294,6 +312,9 @@ type MeshLayout = {
 type MeshPatch = {
   target: [Point, Point, Point, Point]
   boundaries: BoundarySet
+  elastic: boolean
+  before?: Boundary
+  after?: Boundary
 }
 
 function boundaryLength(boundary: Boundary): number {
@@ -441,8 +462,8 @@ function connectionBoundary(a: Point, b: Point): Boundary {
   return (t) => lerp(a, b, t)
 }
 
-function makePatch(target: [Point, Point, Point, Point], boundaries: BoundarySet): MeshPatch {
-  return { target, boundaries }
+function makePatch(target: [Point, Point, Point, Point], boundaries: BoundarySet, elastic = false, before?: Boundary, after?: Boundary): MeshPatch {
+  return { target, boundaries, elastic, before, after }
 }
 
 function buildBandPatches(parent: TargetRect, child: TargetRect): MeshPatch[] {
@@ -456,25 +477,25 @@ function buildBandPatches(parent: TargetRect, child: TargetRect): MeshPatch[] {
       right: connectionBoundary(p.corners[1], c.corners[1]),
       bottom: c.boundaries.top,
       left: connectionBoundary(p.corners[0], c.corners[0])
-    }),
+    }, true, undefined, c.boundaries.bottom),
     makePatch([ptr, pbr, cbr, ctr], {
       top: p.boundaries.right,
       right: connectionBoundary(p.corners[2], c.corners[2]),
       bottom: c.boundaries.right,
       left: connectionBoundary(p.corners[1], c.corners[1])
-    }),
+    }, true, undefined, c.boundaries.left),
     makePatch([pbl, pbr, cbr, cbl], {
       top: p.boundaries.bottom,
       right: connectionBoundary(p.corners[2], c.corners[2]),
       bottom: c.boundaries.bottom,
       left: connectionBoundary(p.corners[3], c.corners[3])
-    }),
+    }, true, undefined, c.boundaries.top),
     makePatch([ptl, pbl, cbl, ctl], {
       top: p.boundaries.left,
       right: connectionBoundary(p.corners[3], c.corners[3]),
       bottom: c.boundaries.left,
       left: connectionBoundary(p.corners[0], c.corners[0])
-    })
+    }, true, undefined, c.boundaries.right)
   ]
 }
 
@@ -516,7 +537,14 @@ function buildNestedMeshLayout(outerPath: RectPath, innerPaths: RectPath[]): Mes
     patches.push(...buildBandPatches(rects[i], rects[i + 1]))
   }
   const smallest = rects[rects.length - 1]
-  patches.push(makePatch(rectCorners(smallest), smallest.path.boundaries))
+  const smallestParent = rects.length > 1 ? rects[rects.length - 2] : null
+  patches.push(makePatch(
+    rectCorners(smallest),
+    smallest.path.boundaries,
+    Boolean(smallestParent),
+    smallestParent?.path.boundaries.top,
+    smallestParent?.path.boundaries.bottom
+  ))
   return { width, height, rects, patches }
 }
 
@@ -605,14 +633,123 @@ function coonsFromBoundaries(boundaries: BoundarySet, u: number, v: number): Poi
   return sub(edgeBlend, cornerBlend)
 }
 
-function transformNestedMesh(layout: MeshLayout, point: Point): Point {
+function elasticCrossPoint(patch: MeshPatch, u: number, v: number, curve: number): Point {
+  const { boundaries, before, after } = patch
+  const start = boundaries.top(u)
+  const end = boundaries.bottom(u)
+  const delta = sub(end, start)
+  const strength = meshCurveStrength(curve)
+  const prev = before?.(u)
+  const next = after?.(u)
+  const startTangent = prev ? mul(sub(end, prev), 0.5) : delta
+  const endTangent = next ? mul(sub(next, start), 0.5) : delta
+  return cubicHermitePoint(
+    start,
+    lerp(delta, startTangent, strength),
+    end,
+    lerp(delta, endTangent, strength),
+    v
+  )
+}
+
+function elasticCoonsFromPatch(patch: MeshPatch, u: number, v: number, curve: number): Point {
+  const { boundaries } = patch
+  const base = elasticCrossPoint(patch, u, v, curve)
+  const leftBase = elasticCrossPoint(patch, 0, v, curve)
+  const rightBase = elasticCrossPoint(patch, 1, v, curve)
+  const leftCorrection = sub(boundaries.left(v), leftBase)
+  const rightCorrection = sub(boundaries.right(v), rightBase)
+  return add(base, add(mul(leftCorrection, 1 - u), mul(rightCorrection, u)))
+}
+
+function transformNestedMesh(layout: MeshLayout, point: Point, curve: number): Point {
   for (const patch of layout.patches) {
     if (!pointInConvexQuad(point, patch.target)) continue
     const uv = invertBilinear(patch.target, point)
     if (!uv) continue
-    return coonsFromBoundaries(patch.boundaries, uv[0], uv[1])
+    return patch.elastic && meshCurveStrength(curve) > 0
+      ? elasticCoonsFromPatch(patch, uv[0], uv[1], curve)
+      : coonsFromBoundaries(patch.boundaries, uv[0], uv[1])
   }
   return coonsFromBoundaries(layout.rects[0].path.boundaries, point[0] / layout.width, point[1] / layout.height)
+}
+
+type SplineConstraint = {
+  value: number
+  point: Point
+}
+
+function addSplineConstraint(constraints: SplineConstraint[], value: number, point: Point) {
+  const existing = constraints.find((constraint) => Math.abs(constraint.value - value) < 1e-5)
+  if (existing) {
+    existing.point = lerp(existing.point, point, 0.5)
+    return
+  }
+  constraints.push({ value, point })
+}
+
+function limitedTangent(tangent: Point, delta: Point): Point {
+  const maxLength = Math.max(1e-6, distance([0, 0], delta) * 1.35)
+  const length = distance([0, 0], tangent)
+  return length > maxLength ? mul(tangent, maxLength / length) : tangent
+}
+
+function splineThroughConstraints(constraints: SplineConstraint[], value: number, curve: number): Point {
+  const sorted = [...constraints].sort((a, b) => a.value - b.value)
+  if (sorted.length === 0) return [0, 0]
+  if (sorted.length === 1 || value <= sorted[0].value) return sorted[0].point
+  const last = sorted[sorted.length - 1]
+  if (value >= last.value) return last.point
+
+  let index = 0
+  for (let i = 0; i < sorted.length - 1; i++) {
+    if (value >= sorted[i].value && value <= sorted[i + 1].value) {
+      index = i
+      break
+    }
+  }
+
+  const current = sorted[index]
+  const next = sorted[index + 1]
+  const span = Math.max(1e-6, next.value - current.value)
+  const localT = (value - current.value) / span
+  const delta = sub(next.point, current.point)
+  const strength = meshCurveStrength(curve)
+  if (strength <= 0) return lerp(current.point, next.point, localT)
+
+  const previous = sorted[index - 1]
+  const after = sorted[index + 2]
+  const currentDerivative = previous
+    ? mul(sub(next.point, previous.point), span / Math.max(1e-6, next.value - previous.value))
+    : delta
+  const nextDerivative = after
+    ? mul(sub(after.point, current.point), span / Math.max(1e-6, after.value - current.value))
+    : delta
+  const m0 = limitedTangent(lerp(delta, currentDerivative, strength), delta)
+  const m1 = limitedTangent(lerp(delta, nextDerivative, strength), delta)
+  return cubicHermitePoint(current.point, m0, next.point, m1, localT)
+}
+
+function transformVerticalMeshLine(layout: MeshLayout, x: number, y: number, curve: number): Point {
+  const constraints: SplineConstraint[] = []
+  for (const rect of layout.rects) {
+    if (x < rect.x0 - 1e-6 || x > rect.x1 + 1e-6) continue
+    const u = (x - rect.x0) / Math.max(1e-6, rect.x1 - rect.x0)
+    addSplineConstraint(constraints, rect.y0, rect.path.boundaries.top(u))
+    addSplineConstraint(constraints, rect.y1, rect.path.boundaries.bottom(u))
+  }
+  return splineThroughConstraints(constraints, y, curve)
+}
+
+function transformHorizontalMeshLine(layout: MeshLayout, x: number, y: number, curve: number): Point {
+  const constraints: SplineConstraint[] = []
+  for (const rect of layout.rects) {
+    if (y < rect.y0 - 1e-6 || y > rect.y1 + 1e-6) continue
+    const v = (y - rect.y0) / Math.max(1e-6, rect.y1 - rect.y0)
+    addSplineConstraint(constraints, rect.x0, rect.path.boundaries.left(v))
+    addSplineConstraint(constraints, rect.x1, rect.path.boundaries.right(v))
+  }
+  return splineThroughConstraints(constraints, x, curve)
 }
 
 function drawScaledPath(ctx: CanvasRenderingContext2D, path: RectPath, scale: number) {
@@ -742,6 +879,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     hideGuides,
     showMesh,
     meshDivisions,
+    meshCurve,
     meshColor,
     onViewChange,
     onAppendCorner,
@@ -770,8 +908,8 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
   const [containerSize, setContainerSize] = useState({ w: 0, h: 0 })
   const [imageReady, setImageReady] = useState(false)
 
-  const propsRef = useRef({ tool, rectangles, draft, fillShapes, fillDraft, activeFillShapeIndex, activeRectangleIndex, hideGuides, showMesh, meshDivisions, meshColor })
-  propsRef.current = { tool, rectangles, draft, fillShapes, fillDraft, activeFillShapeIndex, activeRectangleIndex, hideGuides, showMesh, meshDivisions, meshColor }
+  const propsRef = useRef({ tool, rectangles, draft, fillShapes, fillDraft, activeFillShapeIndex, activeRectangleIndex, hideGuides, showMesh, meshDivisions, meshCurve, meshColor })
+  propsRef.current = { tool, rectangles, draft, fillShapes, fillDraft, activeFillShapeIndex, activeRectangleIndex, hideGuides, showMesh, meshDivisions, meshCurve, meshColor }
 
   useLayoutEffect(() => {
     const el = containerRef.current
@@ -949,7 +1087,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     [hideGuides, imageToScreen]
   )
 
-  const drawProjectedMesh = useCallback((ctx: CanvasRenderingContext2D, outer: RectPath, innerPaths: RectPath[], divisions: number, color: string) => {
+  const drawProjectedMesh = useCallback((ctx: CanvasRenderingContext2D, outer: RectPath, innerPaths: RectPath[], divisions: number, curve: number, color: string) => {
     const safeDivisions = Math.max(2, Math.min(40, Math.round(divisions)))
     const layout = buildNestedMeshLayout(outer, innerPaths)
     ctx.save()
@@ -990,14 +1128,14 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     for (const x of gridXs) {
       const points: Point[] = []
       for (let i = 0; i <= lineSamples; i++) {
-        points.push(transformNestedMesh(layout, [x, (layout.height * i) / lineSamples]))
+        points.push(transformVerticalMeshLine(layout, x, (layout.height * i) / lineSamples, curve))
       }
       drawMeshLine(points)
     }
     for (const y of gridYs) {
       const points: Point[] = []
       for (let i = 0; i <= lineSamples; i++) {
-        points.push(transformNestedMesh(layout, [(layout.width * i) / lineSamples, y]))
+        points.push(transformHorizontalMeshLine(layout, (layout.width * i) / lineSamples, y, curve))
       }
       drawMeshLine(points)
     }
@@ -1007,7 +1145,12 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     ctx.strokeStyle = color
     ctx.lineWidth = 1.5
     const smallest = layout.rects[layout.rects.length - 1]
-    const center = transformNestedMesh(layout, [(smallest.x0 + smallest.x1) / 2, (smallest.y0 + smallest.y1) / 2])
+    const centerPoint: Point = [(smallest.x0 + smallest.x1) / 2, (smallest.y0 + smallest.y1) / 2]
+    const center = lerp(
+      transformVerticalMeshLine(layout, centerPoint[0], centerPoint[1], curve),
+      transformHorizontalMeshLine(layout, centerPoint[0], centerPoint[1], curve),
+      0.5
+    )
     const [cx, cy] = imageToScreen(center[0], center[1])
     ctx.beginPath()
     ctx.arc(cx, cy, 3, 0, Math.PI * 2)
@@ -1151,6 +1294,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       activeRectangleIndex: currentActiveRectangleIndex,
       showMesh: meshVisible,
       meshDivisions: curMeshDivisions,
+      meshCurve: curMeshCurve,
       meshColor: curMeshColor
     } = propsRef.current
     const derived = deriveRectangleRoles(currentRectangles)
@@ -1170,7 +1314,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
         }
         effectiveMeshColor = inverseColorRef.current.color
       }
-      drawProjectedMesh(ctx, derived.outerPath, derived.innerPaths, curMeshDivisions, effectiveMeshColor)
+      drawProjectedMesh(ctx, derived.outerPath, derived.innerPaths, curMeshDivisions, curMeshCurve, effectiveMeshColor)
     }
     currentRectangles.forEach((path, index) => {
       drawPath(ctx, path, index, derived.outerIndex, currentActiveRectangleIndex, editingRectangle, 1)
@@ -1208,7 +1352,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
 
   useEffect(() => {
     requestDraw()
-  }, [containerSize, imageReady, rectangles, draft, fillShapes, fillDraft, activeFillShapeIndex, activeRectangleIndex, tool, hideGuides, showMesh, meshDivisions, meshColor, editDragKey, requestDraw])
+  }, [containerSize, imageReady, rectangles, draft, fillShapes, fillDraft, activeFillShapeIndex, activeRectangleIndex, tool, hideGuides, showMesh, meshDivisions, meshCurve, meshColor, editDragKey, requestDraw])
 
   const findSegmentHit = useCallback((rectangleIndex: number, screenPoint: Point): HoverSegment => {
     const path = pathForIndex(rectangleIndex)

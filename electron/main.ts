@@ -212,13 +212,15 @@ async function exportDewarpedTo(
   rectangles: unknown[],
   quality: number,
   outputPath: string,
+  meshCurve?: number,
   onProgress?: (progress: DewarpProgress) => void
 ) {
   return sidecar.call('export_dewarped', {
     path: imagePath,
     rectangles,
     output_path: outputPath,
-    quality
+    quality,
+    mesh_curve: meshCurve
   }, onProgress)
 }
 
@@ -268,13 +270,13 @@ ipcMain.handle('export-corrected-as', async (_evt, imagePath: string, corners: n
   return exportCorrectedTo(imagePath, corners, quality, result.filePath)
 })
 
-ipcMain.handle('export-dewarped', async (evt, imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string, fillShapes?: unknown[], fillSampleRegions?: unknown[]) => {
+ipcMain.handle('export-dewarped', async (evt, imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string, meshCurve?: number, fillShapes?: unknown[], fillSampleRegions?: unknown[]) => {
   const outputPath = correctedOutputPath(outputBasePath || imagePath)
-  const result = await exportDewarpedTo(imagePath, rectangles, quality, outputPath, dewarpProgressSender(evt, 'export'))
+  const result = await exportDewarpedTo(imagePath, rectangles, quality, outputPath, meshCurve, dewarpProgressSender(evt, 'export'))
   return await applyFillToOutputIfNeeded(outputPath, fillShapes, quality, fillSampleRegions) || result
 })
 
-ipcMain.handle('export-dewarped-as', async (evt, imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string, fillShapes?: unknown[], fillSampleRegions?: unknown[]) => {
+ipcMain.handle('export-dewarped-as', async (evt, imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string, meshCurve?: number, fillShapes?: unknown[], fillSampleRegions?: unknown[]) => {
   const basePath = outputBasePath || imagePath
   const base = basename(basePath, extname(basePath))
   mkdirSync(outputDir, { recursive: true })
@@ -284,7 +286,7 @@ ipcMain.handle('export-dewarped-as', async (evt, imagePath: string, rectangles: 
     filters: [{ name: 'JPEG', extensions: ['jpg', 'jpeg'] }]
   })
   if (result.canceled || !result.filePath) return null
-  const dewarped = await exportDewarpedTo(imagePath, rectangles, quality, result.filePath, dewarpProgressSender(evt, 'export-as'))
+  const dewarped = await exportDewarpedTo(imagePath, rectangles, quality, result.filePath, meshCurve, dewarpProgressSender(evt, 'export-as'))
   return await applyFillToOutputIfNeeded(result.filePath, fillShapes, quality, fillSampleRegions) || dewarped
 })
 
@@ -302,9 +304,9 @@ ipcMain.handle('preview-corrected', async (_evt, imagePath: string, corners: num
   }
 })
 
-ipcMain.handle('preview-dewarped', async (evt, imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string) => {
+ipcMain.handle('preview-dewarped', async (evt, imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string, meshCurve?: number) => {
   const outputPath = previewOutputPath(outputBasePath || imagePath)
-  const result = await exportDewarpedTo(imagePath, rectangles, quality, outputPath, dewarpProgressSender(evt, 'preview')) as {
+  const result = await exportDewarpedTo(imagePath, rectangles, quality, outputPath, meshCurve, dewarpProgressSender(evt, 'preview')) as {
     outputWidth: number
     outputHeight: number
   }

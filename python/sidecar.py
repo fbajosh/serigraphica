@@ -46,6 +46,7 @@ def _export_dewarped(params: dict, progress: ProgressCallback | None = None) -> 
         params["rectangles"],
         params["output_path"],
         int(params.get("quality", 92)),
+        params.get("mesh_curve", 75),
         progress,
     )
 

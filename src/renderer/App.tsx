@@ -229,6 +229,7 @@ export function App() {
   const [hideGuides, setHideGuides] = useState(false)
   const [showMesh, setShowMesh] = useState(false)
   const [meshDivisions, setMeshDivisions] = useState(10)
+  const [meshCurve, setMeshCurve] = useState(75)
   const [zoomLevel, setZoomLevel] = useState(1)
   const [dewarpPreview, setDewarpPreview] = useState<Loaded | null>(null)
   const [dewarpProgress, setDewarpProgress] = useState<DewarpProgress | null>(null)
@@ -524,14 +525,14 @@ export function App() {
     setStatus(rectangles.length >= 2 ? 'Exporting dewarped image...' : 'Exporting perspective image...')
     try {
       const exportFillShapes = filledImage || fillDirty ? fillShapes : []
-      const out = await window.serigraphica.exportDewarped(image.path, rectangles, 92, image.path, exportFillShapes, buildFillSampleRegions(rectangles))
+      const out = await window.serigraphica.exportDewarped(image.path, rectangles, 92, image.path, meshCurve, exportFillShapes, buildFillSampleRegions(rectangles))
       setStatus(`Exported ${out.outputWidth}x${out.outputHeight} -> ${out.outputPath}`)
     } catch (err) {
       setStatus(`Error: ${(err as Error).message}`)
     } finally {
       setBusy(false)
     }
-  }, [fillDirty, fillShapes, filledImage, image, rectangles])
+  }, [fillDirty, fillShapes, filledImage, image, meshCurve, rectangles])
 
   const handleExportAs = useCallback(async () => {
     if (!image) return
@@ -544,7 +545,7 @@ export function App() {
     setStatus(rectangles.length >= 2 ? 'Exporting dewarped image...' : 'Exporting perspective image...')
     try {
       const exportFillShapes = filledImage || fillDirty ? fillShapes : []
-      const out = await window.serigraphica.exportDewarpedAs(image.path, rectangles, 92, image.path, exportFillShapes, buildFillSampleRegions(rectangles))
+      const out = await window.serigraphica.exportDewarpedAs(image.path, rectangles, 92, image.path, meshCurve, exportFillShapes, buildFillSampleRegions(rectangles))
       if (!out) {
         setStatus('Export cancelled')
         return
@@ -555,7 +556,7 @@ export function App() {
     } finally {
       setBusy(false)
     }
-  }, [fillDirty, fillShapes, filledImage, image, rectangles])
+  }, [fillDirty, fillShapes, filledImage, image, meshCurve, rectangles])
 
   const handleDewarp = useCallback(async () => {
     if (dewarpProgress) {
@@ -585,7 +586,7 @@ export function App() {
     setDewarpProgress({ percent: 0, stage: 'Starting', operation: 'preview' })
     setStatus('Generating dewarp preview...')
     try {
-      const preview = await window.serigraphica.previewDewarped(image.path, rectangles, 92, image.path)
+      const preview = await window.serigraphica.previewDewarped(image.path, rectangles, 92, image.path, meshCurve)
       setDewarpPreview(preview)
       setFillDirty(Boolean(filledImage))
       setStatus(`Dewarp preview ${preview.width}x${preview.height}`)
@@ -596,7 +597,12 @@ export function App() {
       setDewarpProgress(null)
       setBusy(false)
     }
-  }, [dewarpPreview, dewarpProgress, filledImage, image, rectangles])
+  }, [dewarpPreview, dewarpProgress, filledImage, image, meshCurve, rectangles])
+
+  const handleMeshCurveChange = useCallback((value: number) => {
+    setMeshCurve(value)
+    clearDewarpOutputs()
+  }, [clearDewarpOutputs])
 
   const handleProjectMesh = useCallback(() => {
     if (rectangles.length < 1) {
@@ -759,6 +765,7 @@ export function App() {
             hideGuides={hideGuides}
             showMesh={meshVisibleInCanvas}
             meshDivisions={meshDivisions}
+            meshCurve={meshCurve}
             meshColor="inverse"
             onViewChange={setZoomLevel}
             onAppendCorner={handleAppendCorner}
@@ -838,7 +845,7 @@ export function App() {
         <section className="panel-workflow-section">
           <h3>Mesh</h3>
           <div className="row">
-            <label>Density</label>
+            <label>Grid Density</label>
             <span>{meshDivisions}x{meshDivisions}</span>
           </div>
           <input
@@ -847,6 +854,18 @@ export function App() {
             max={24}
             value={meshDivisions}
             onChange={(e) => setMeshDivisions(Number(e.target.value))}
+            style={{ width: '100%' }}
+          />
+          <div className="row">
+            <label>Grid Curve</label>
+            <span>{meshCurve}%</span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            value={meshCurve}
+            onChange={(e) => handleMeshCurveChange(Number(e.target.value))}
             style={{ width: '100%' }}
           />
           <ToolButton active={dewarpActive} onClick={handleDewarp} disabled={!image || rectangles.length < 2 || (busy && !dewarpProgress)} title="Toggle dewarp preview" className={`${dewarpButtonClass} mesh-dewarp-button`}>

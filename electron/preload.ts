@@ -11,12 +11,12 @@ contextBridge.exposeInMainWorld('serigraphica', {
     ipcRenderer.invoke('export-corrected-as', imagePath, corners, quality),
   previewCorrected: (imagePath: string, corners: number[][], quality: number) =>
     ipcRenderer.invoke('preview-corrected', imagePath, corners, quality),
-  exportDewarped: (imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string, fillShapes?: unknown[], fillSampleRegions?: unknown[]) =>
-    ipcRenderer.invoke('export-dewarped', imagePath, rectangles, quality, outputBasePath, fillShapes, fillSampleRegions),
-  exportDewarpedAs: (imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string, fillShapes?: unknown[], fillSampleRegions?: unknown[]) =>
-    ipcRenderer.invoke('export-dewarped-as', imagePath, rectangles, quality, outputBasePath, fillShapes, fillSampleRegions),
-  previewDewarped: (imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string) =>
-    ipcRenderer.invoke('preview-dewarped', imagePath, rectangles, quality, outputBasePath),
+  exportDewarped: (imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string, meshCurve?: number, fillShapes?: unknown[], fillSampleRegions?: unknown[]) =>
+    ipcRenderer.invoke('export-dewarped', imagePath, rectangles, quality, outputBasePath, meshCurve, fillShapes, fillSampleRegions),
+  exportDewarpedAs: (imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string, meshCurve?: number, fillShapes?: unknown[], fillSampleRegions?: unknown[]) =>
+    ipcRenderer.invoke('export-dewarped-as', imagePath, rectangles, quality, outputBasePath, meshCurve, fillShapes, fillSampleRegions),
+  previewDewarped: (imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string, meshCurve?: number) =>
+    ipcRenderer.invoke('preview-dewarped', imagePath, rectangles, quality, outputBasePath, meshCurve),
   previewFilled: (imagePath: string, fillShapes: unknown[], quality: number, fillSampleRegions?: unknown[]) =>
     ipcRenderer.invoke('preview-filled', imagePath, fillShapes, quality, fillSampleRegions),
   cancelDewarp: () => ipcRenderer.invoke('cancel-dewarp'),

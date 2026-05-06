@@ -76,6 +76,7 @@ export type SerigraphicaAPI = {
     rectangles: RectPath[],
     quality: number,
     outputBasePath?: string,
+    meshCurve?: number,
     fillShapes?: FillShape[],
     fillSampleRegions?: FillSampleRegion[]
   ) => Promise<ExportResult>
@@ -84,6 +85,7 @@ export type SerigraphicaAPI = {
     rectangles: RectPath[],
     quality: number,
     outputBasePath?: string,
+    meshCurve?: number,
     fillShapes?: FillShape[],
     fillSampleRegions?: FillSampleRegion[]
   ) => Promise<ExportResult | null>
@@ -91,7 +93,8 @@ export type SerigraphicaAPI = {
     imagePath: string,
     rectangles: RectPath[],
     quality: number,
-    outputBasePath?: string
+    outputBasePath?: string,
+    meshCurve?: number
   ) => Promise<LoadedImage>
   previewFilled: (
     imagePath: string,

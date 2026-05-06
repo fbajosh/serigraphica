@@ -67,6 +67,29 @@ def _lerp(a: Point, b: Point, t: float) -> Point:
     return (a[0] * (1 - t) + b[0] * t, a[1] * (1 - t) + b[1] * t)
 
 
+def _mesh_curve_strength(mesh_curve: float | int | None) -> float:
+    try:
+        value = float(mesh_curve if mesh_curve is not None else 75.0)
+    except (TypeError, ValueError):
+        value = 75.0
+    return max(0.0, min(1.0, value / 100.0))
+
+
+def _hermite_array(p0: np.ndarray, m0: np.ndarray, p1: np.ndarray, m1: np.ndarray, t: np.ndarray) -> np.ndarray:
+    t2 = t * t
+    t3 = t2 * t
+    h00 = 2.0 * t3 - 3.0 * t2 + 1.0
+    h10 = t3 - 2.0 * t2 + t
+    h01 = -2.0 * t3 + 3.0 * t2
+    h11 = t3 - t2
+    return (
+        p0 * h00[:, None]
+        + m0 * h10[:, None]
+        + p1 * h01[:, None]
+        + m1 * h11[:, None]
+    )
+
+
 def _node_point(node: dict) -> Point:
     point = node["point"]
     return (float(point[0]), float(point[1]))
@@ -355,10 +378,16 @@ def _sample_boundary(boundary) -> np.ndarray:
     return np.array([boundary(i / (BOUNDARY_SAMPLE_COUNT - 1)) for i in range(BOUNDARY_SAMPLE_COUNT)], dtype=np.float64)
 
 
-def _make_patch(target: list[Point], boundaries: dict) -> dict:
+def _make_patch(target: list[Point], boundaries: dict, elastic: bool = False, before=None, after=None) -> dict:
+    samples = {name: _sample_boundary(boundary) for name, boundary in boundaries.items()}
+    if before is not None:
+        samples["before"] = _sample_boundary(before)
+    if after is not None:
+        samples["after"] = _sample_boundary(after)
     return {
         "target": np.array(target, dtype=np.float64),
-        "samples": {name: _sample_boundary(boundary) for name, boundary in boundaries.items()},
+        "samples": samples,
+        "elastic": elastic,
     }
 
 
@@ -373,25 +402,25 @@ def _band_patches(parent: dict, child: dict) -> list[dict]:
             "right": _connection_boundary(p["corners"][1], c["corners"][1]),
             "bottom": c["boundaries"]["top"],
             "left": _connection_boundary(p["corners"][0], c["corners"][0]),
-        }),
+        }, True, None, c["boundaries"]["bottom"]),
         _make_patch([ptr, pbr, cbr, ctr], {
             "top": p["boundaries"]["right"],
             "right": _connection_boundary(p["corners"][2], c["corners"][2]),
             "bottom": c["boundaries"]["right"],
             "left": _connection_boundary(p["corners"][1], c["corners"][1]),
-        }),
+        }, True, None, c["boundaries"]["left"]),
         _make_patch([pbl, pbr, cbr, cbl], {
             "top": p["boundaries"]["bottom"],
             "right": _connection_boundary(p["corners"][2], c["corners"][2]),
             "bottom": c["boundaries"]["bottom"],
             "left": _connection_boundary(p["corners"][3], c["corners"][3]),
-        }),
+        }, True, None, c["boundaries"]["top"]),
         _make_patch([ptl, pbl, cbl, ctl], {
             "top": p["boundaries"]["left"],
             "right": _connection_boundary(p["corners"][3], c["corners"][3]),
             "bottom": c["boundaries"]["left"],
             "left": _connection_boundary(p["corners"][0], c["corners"][0]),
-        }),
+        }, True, None, c["boundaries"]["right"]),
     ]
 
 
@@ -423,7 +452,14 @@ def _build_nested_mesh_layout(outer_path: dict, inner_paths: list[dict]) -> dict
     for i in range(len(rects) - 1):
         patches.extend(_band_patches(rects[i], rects[i + 1]))
     smallest = rects[-1]
-    patches.append(_make_patch(_target_rect_corners(smallest), smallest["path"]["boundaries"]))
+    smallest_parent = rects[-2] if len(rects) > 1 else None
+    patches.append(_make_patch(
+        _target_rect_corners(smallest),
+        smallest["path"]["boundaries"],
+        smallest_parent is not None,
+        smallest_parent["path"]["boundaries"]["top"] if smallest_parent else None,
+        smallest_parent["path"]["boundaries"]["bottom"] if smallest_parent else None,
+    ))
     outer_patch = _make_patch(_target_rect_corners(rects[0]), rects[0]["path"]["boundaries"])
     return {"width": width, "height": height, "rects": rects, "patches": patches, "outer_patch": outer_patch}
 
@@ -488,8 +524,30 @@ def _interp_sample(samples: np.ndarray, values: np.ndarray) -> np.ndarray:
     return samples[idx] * (1 - frac)[:, None] + samples[idx1] * frac[:, None]
 
 
-def _coons_patch_array(patch: dict, u: np.ndarray, v: np.ndarray) -> np.ndarray:
+def _elastic_cross_array(samples: dict, u: np.ndarray, v: np.ndarray, mesh_curve: float | int | None) -> np.ndarray:
+    start = _interp_sample(samples["top"], u)
+    end = _interp_sample(samples["bottom"], u)
+    delta = end - start
+    strength = _mesh_curve_strength(mesh_curve)
+    previous = _interp_sample(samples["before"], u) if "before" in samples else None
+    next_point = _interp_sample(samples["after"], u) if "after" in samples else None
+    start_tangent = (end - previous) * 0.5 if previous is not None else delta
+    end_tangent = (next_point - start) * 0.5 if next_point is not None else delta
+    m0 = delta * (1.0 - strength) + start_tangent * strength
+    m1 = delta * (1.0 - strength) + end_tangent * strength
+    return _hermite_array(start, m0, end, m1, v)
+
+
+def _coons_patch_array(patch: dict, u: np.ndarray, v: np.ndarray, mesh_curve: float | int | None) -> np.ndarray:
     samples = patch["samples"]
+    if patch.get("elastic") and _mesh_curve_strength(mesh_curve) > 0:
+        base = _elastic_cross_array(samples, u, v, mesh_curve)
+        left_base = _elastic_cross_array(samples, np.zeros_like(u), v, mesh_curve)
+        right_base = _elastic_cross_array(samples, np.ones_like(u), v, mesh_curve)
+        left = _interp_sample(samples["left"], v)
+        right = _interp_sample(samples["right"], v)
+        return base + (left - left_base) * (1.0 - u)[:, None] + (right - right_base) * u[:, None]
+
     top = _interp_sample(samples["top"], u)
     right = _interp_sample(samples["right"], v)
     bottom = _interp_sample(samples["bottom"], u)
@@ -508,7 +566,7 @@ def _coons_patch_array(patch: dict, u: np.ndarray, v: np.ndarray) -> np.ndarray:
     return edge_blend - corner_blend
 
 
-def _transform_nested_chunk(layout: dict, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _transform_nested_chunk(layout: dict, points: np.ndarray, mesh_curve: float | int | None) -> tuple[np.ndarray, np.ndarray]:
     out = np.empty_like(points, dtype=np.float64)
     assigned = np.zeros(points.shape[0], dtype=bool)
     for patch in layout["patches"]:
@@ -519,7 +577,7 @@ def _transform_nested_chunk(layout: dict, points: np.ndarray) -> tuple[np.ndarra
         valid_candidates = candidates[valid]
         if valid_candidates.size == 0:
             continue
-        out[valid_candidates] = _coons_patch_array(patch, u[valid], v[valid])
+        out[valid_candidates] = _coons_patch_array(patch, u[valid], v[valid], mesh_curve)
         assigned[valid_candidates] = True
 
     if not np.all(assigned):
@@ -527,7 +585,7 @@ def _transform_nested_chunk(layout: dict, points: np.ndarray) -> tuple[np.ndarra
         missing = np.where(~assigned)[0]
         u = np.clip(points[missing, 0] / max(1.0, layout["width"]), 0.0, 1.0)
         v = np.clip(points[missing, 1] / max(1.0, layout["height"]), 0.0, 1.0)
-        out[missing] = _coons_patch_array(fallback, u, v)
+        out[missing] = _coons_patch_array(fallback, u, v, mesh_curve)
     return out[:, 0], out[:, 1]
 
 
@@ -1059,6 +1117,7 @@ def export_dewarped(
     rectangles: list[dict],
     output_path: str,
     quality: int = 92,
+    mesh_curve: float | int | None = 75.0,
     progress: ProgressCallback | None = None,
 ) -> dict:
     _emit_progress(progress, 2, "Loading image")
@@ -1094,7 +1153,7 @@ def export_dewarped(
         ys = y_coords[y0:y1]
         grid_x, grid_y = np.meshgrid(xs, ys)
         points = np.column_stack((grid_x.ravel(), grid_y.ravel()))
-        src_x, src_y = _transform_nested_chunk(layout, points)
+        src_x, src_y = _transform_nested_chunk(layout, points, mesh_curve)
         map_x[y0:y1, :] = src_x.reshape((y1 - y0, width)).astype(np.float32)
         map_y[y0:y1, :] = src_y.reshape((y1 - y0, width)).astype(np.float32)
         percent = 18 + 67 * (y1 / height)
