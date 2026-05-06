@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('serigraphica', {
     ipcRenderer.invoke('export-dewarped-as', imagePath, rectangles, quality),
   previewDewarped: (imagePath: string, rectangles: unknown[], quality: number) =>
     ipcRenderer.invoke('preview-dewarped', imagePath, rectangles, quality),
+  cancelDewarp: () => ipcRenderer.invoke('cancel-dewarp'),
   onDewarpProgress: (callback: (progress: unknown) => void) => {
     const listener = (_event: IpcRendererEvent, progress: unknown) => callback(progress)
     ipcRenderer.on('dewarp-progress', listener)

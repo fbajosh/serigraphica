@@ -289,6 +289,11 @@ ipcMain.handle('preview-dewarped', async (evt, imagePath: string, rectangles: un
   }
 })
 
+ipcMain.handle('cancel-dewarp', async () => {
+  await sidecar.restart()
+  return true
+})
+
 app.whenReady().then(() => {
   registerLocalImageProtocol()
   sidecar.start()

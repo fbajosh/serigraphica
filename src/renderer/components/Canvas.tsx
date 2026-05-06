@@ -17,12 +17,6 @@ const SEGMENT_HIT_RADIUS = 9 // screen px
 const CURVE_SAMPLE_STEPS = 36
 const DEFAULT_HANDLE_LENGTH = 60 // image px
 const MESH_CURVE_SAMPLE_STEPS = 18
-const MESH_CONSTRAINT_STEPS = 8
-const TPS_SMOOTHING = 0.012
-const OUTER_MESH_WEIGHT = 1.8
-const INNER_MESH_WEIGHT = 0.28
-const OUTER_PRIOR_WEIGHT = 0.08
-const PARALLEL_RAIL_WEIGHT = 0.14
 const INVERSE_MESH_COLOR = 'inverse'
 const INVERSE_FALLBACK_COLOR = '#4de8ff'
 const COLOR_SAMPLE_MAX_DIM = 720
@@ -30,6 +24,8 @@ const COLOR_SAMPLE_MAX_DIM = 720
 const RECTANGLE_COLORS = ['#ff5e5e', '#4ea1ff', '#4de8ff', '#5ee05e', '#ffd84d', '#ff5cff'] as const
 const HALO_COLOR = 'rgba(0, 0, 0, 0.85)'
 const SIDE_NODE_COLOR = '#f4d35e'
+const ACTIVE_EDGE_OFFSET = 4
+const ACTIVE_EDGE_WIDTH = 1.4
 
 type Props = {
   src: string
@@ -144,7 +140,7 @@ function lerp(a: Point, b: Point, t: number): Point {
   ]
 }
 
-function colorForRectangle(index: number, outerIndex: number | null): { stroke: string; fill: string; guide: string } {
+function colorForRectangle(index: number, outerIndex: number | null): { stroke: string; guide: string } {
   const stroke = index < 0
     ? RECTANGLE_COLORS[1]
     : index === outerIndex
@@ -153,7 +149,6 @@ function colorForRectangle(index: number, outerIndex: number | null): { stroke: 
   const isOuter = index === outerIndex
   return {
     stroke,
-    fill: isOuter ? 'rgba(255, 94, 94, 0.08)' : 'rgba(78, 161, 255, 0.08)',
     guide: isOuter ? 'rgba(255, 94, 94, 0.42)' : 'rgba(78, 161, 255, 0.42)'
   }
 }
@@ -260,8 +255,15 @@ type BoundarySet = {
   left: Boundary
 }
 
-type InnerMeshLayout = {
+type CanonicalPath = {
   path: RectPath
+  cornerNodeIndices: [number, number, number, number]
+  corners: [Point, Point, Point, Point]
+  boundaries: BoundarySet
+}
+
+type TargetRect = {
+  path: CanonicalPath
   x0: number
   x1: number
   y0: number
@@ -271,39 +273,28 @@ type InnerMeshLayout = {
 type MeshLayout = {
   width: number
   height: number
-  innerRects: InnerMeshLayout[]
+  rects: TargetRect[]
+  patches: MeshPatch[]
 }
 
-type TpsModel = {
-  targets: Point[]
-  xWeights: number[]
-  yWeights: number[]
+type MeshPatch = {
+  target: [Point, Point, Point, Point]
+  boundaries: BoundarySet
 }
 
 function boundaryLength(boundary: Boundary): number {
   let total = 0
   let previous = boundary(0)
-  for (let i = 1; i <= MESH_CONSTRAINT_STEPS * 3; i++) {
-    const point = boundary(i / (MESH_CONSTRAINT_STEPS * 3))
+  const steps = MESH_CURVE_SAMPLE_STEPS * 2
+  for (let i = 1; i <= steps; i++) {
+    const point = boundary(i / steps)
     total += distance(previous, point)
     previous = point
   }
   return total
 }
 
-function pathBoundaries(path: RectPath): BoundarySet {
-  return {
-    top: (u) => pointOnSide(path, 0, u),
-    right: (v) => pointOnSide(path, 1, v),
-    bottom: (u) => pointOnSide(path, 2, 1 - u),
-    left: (v) => pointOnSide(path, 3, 1 - v)
-  }
-}
-
-function affineParamForOuter(outerPath: RectPath, point: Point): Point {
-  const tl = pathCornerPoint(outerPath, 0)
-  const tr = pathCornerPoint(outerPath, 1)
-  const bl = pathCornerPoint(outerPath, 3)
+function solveBasisParam(tl: Point, tr: Point, bl: Point, point: Point): Point {
   const ux = tr[0] - tl[0]
   const uy = tr[1] - tl[1]
   const vx = bl[0] - tl[0]
@@ -313,119 +304,287 @@ function affineParamForOuter(outerPath: RectPath, point: Point): Point {
   const det = ux * vy - uy * vx
   if (Math.abs(det) < 1e-6) return [0.5, 0.5]
   return [
-    Math.max(0, Math.min(1, (px * vy - py * vx) / det)),
-    Math.max(0, Math.min(1, (ux * py - uy * px) / det))
+    (px * vy - py * vx) / det,
+    (ux * py - uy * px) / det
   ]
 }
 
-function meshLayoutForPaths(outerPath: RectPath, innerPaths: RectPath[]): MeshLayout {
-  const outerBoundaries = pathBoundaries(outerPath)
-  const width = Math.max(1, (boundaryLength(outerBoundaries.top) + boundaryLength(outerBoundaries.bottom)) / 2)
-  const height = Math.max(1, (boundaryLength(outerBoundaries.left) + boundaryLength(outerBoundaries.right)) / 2)
-  const minGap = Math.max(8, Math.min(width, height) * 0.025)
-  const innerRects = innerPaths.map((path) => {
-    const boundaries = pathBoundaries(path)
-    const measuredWidth = Math.max(1, (boundaryLength(boundaries.top) + boundaryLength(boundaries.bottom)) / 2)
-    const measuredHeight = Math.max(1, (boundaryLength(boundaries.left) + boundaryLength(boundaries.right)) / 2)
-    const params = [0, 1, 2, 3].map((index) => affineParamForOuter(outerPath, pathCornerPoint(path, index)))
-    const leftU = (params[0][0] + params[3][0]) / 2
-    const rightU = (params[1][0] + params[2][0]) / 2
-    const topV = (params[0][1] + params[1][1]) / 2
-    const bottomV = (params[2][1] + params[3][1]) / 2
-    const targetWidth = Math.min(width - minGap * 2, Math.max(minGap, Math.abs(rightU - leftU) * width, measuredWidth * 0.35))
-    const targetHeight = Math.min(height - minGap * 2, Math.max(minGap, Math.abs(bottomV - topV) * height, measuredHeight * 0.35))
-    const cx = width * ((leftU + rightU) / 2)
-    const cy = height * ((topV + bottomV) / 2)
-    const x0 = Math.max(minGap, Math.min(width - minGap - targetWidth, cx - targetWidth / 2))
-    const y0 = Math.max(minGap, Math.min(height - minGap - targetHeight, cy - targetHeight / 2))
-    return {
-      path,
-      x0,
-      x1: x0 + targetWidth,
-      y0,
-      y1: y0 + targetHeight
-    }
+function pickCanonicalCornerIndices(path: RectPath, outer?: CanonicalPath): [number, number, number, number] {
+  const entries = path.cornerIndices.map((nodeIndex) => {
+    const point = path.nodes[nodeIndex].point
+    const coord = outer
+      ? solveBasisParam(outer.corners[0], outer.corners[1], outer.corners[3], point)
+      : point
+    return { nodeIndex, point, coord }
   })
-  return { width, height, innerRects }
-}
-
-function tpsKernel(a: Point, b: Point): number {
-  const dx = a[0] - b[0]
-  const dy = a[1] - b[1]
-  const r2 = dx * dx + dy * dy
-  return r2 <= 1e-9 ? 0 : r2 * Math.log(r2)
-}
-
-function solveLinearSystem(matrix: number[][], rhs: number[]): number[] | null {
-  const n = rhs.length
-  const rows = matrix.map((row, i) => [...row, rhs[i]])
-  for (let col = 0; col < n; col++) {
-    let pivot = col
-    for (let row = col + 1; row < n; row++) {
-      if (Math.abs(rows[row][col]) > Math.abs(rows[pivot][col])) pivot = row
-    }
-    if (Math.abs(rows[pivot][col]) < 1e-8) return null
-    if (pivot !== col) {
-      const tmp = rows[col]
-      rows[col] = rows[pivot]
-      rows[pivot] = tmp
-    }
-    const divisor = rows[col][col]
-    for (let j = col; j <= n; j++) rows[col][j] /= divisor
-    for (let row = 0; row < n; row++) {
-      if (row === col) continue
-      const factor = rows[row][col]
-      if (Math.abs(factor) < 1e-12) continue
-      for (let j = col; j <= n; j++) rows[row][j] -= factor * rows[col][j]
-    }
+  const pick = (score: (entry: typeof entries[number]) => number, reverse = false) => {
+    return entries.reduce((best, entry) => {
+      const current = score(entry)
+      const previous = score(best)
+      return reverse ? (current > previous ? entry : best) : (current < previous ? entry : best)
+    }).nodeIndex
   }
-  return rows.map((row) => row[n])
+  const ordered = [
+    pick((entry) => entry.coord[0] + entry.coord[1]),
+    pick((entry) => entry.coord[0] - entry.coord[1], true),
+    pick((entry) => entry.coord[0] + entry.coord[1], true),
+    pick((entry) => entry.coord[0] - entry.coord[1])
+  ] as [number, number, number, number]
+  if (new Set(ordered).size === 4) return ordered
+
+  const center = entries.reduce<Point>((acc, entry) => add(acc, entry.coord), [0, 0])
+  center[0] /= entries.length
+  center[1] /= entries.length
+  const byAngle = [...entries].sort((a, b) => (
+    Math.atan2(a.coord[1] - center[1], a.coord[0] - center[0]) -
+    Math.atan2(b.coord[1] - center[1], b.coord[0] - center[0])
+  ))
+  const startIndex = byAngle.reduce((bestIndex, entry, index) => {
+    const best = byAngle[bestIndex]
+    return entry.coord[0] + entry.coord[1] < best.coord[0] + best.coord[1] ? index : bestIndex
+  }, 0)
+  const rotated = [...byAngle.slice(startIndex), ...byAngle.slice(0, startIndex)].map((entry) => entry.nodeIndex)
+  return rotated as [number, number, number, number]
 }
 
-function buildTpsModel(targets: Point[], sources: Point[], weights: number[]): TpsModel | null {
-  const n = targets.length
-  if (n < 4 || n !== sources.length || n !== weights.length) return null
-  const size = n + 3
-  const matrix = Array.from({ length: size }, () => Array(size).fill(0))
-  const scale = Math.max(
-    1,
-    ...targets.map((point) => Math.hypot(point[0], point[1]))
+function pathSegmentPointDirected(path: RectPath, index: number, direction: 1 | -1, t: number): Point {
+  if (direction === 1) return pathSegmentPoint(path, index, t)
+  const prevIndex = (index - 1 + path.nodes.length) % path.nodes.length
+  return pathSegmentPoint(path, prevIndex, 1 - t)
+}
+
+function directedRouteLength(path: RectPath, startIndex: number, endIndex: number, direction: 1 | -1): number {
+  let total = 0
+  let index = startIndex
+  let previous = pathSegmentPointDirected(path, index, direction, 0)
+  for (let guard = 0; guard < path.nodes.length; guard++) {
+    for (let step = 1; step <= MESH_CURVE_SAMPLE_STEPS; step++) {
+      const point = pathSegmentPointDirected(path, index, direction, step / MESH_CURVE_SAMPLE_STEPS)
+      total += distance(previous, point)
+      previous = point
+    }
+    index = (index + direction + path.nodes.length) % path.nodes.length
+    if (index === endIndex) break
+  }
+  return total
+}
+
+function routeBoundary(path: RectPath, startIndex: number, endIndex: number): Boundary {
+  const forwardLength = directedRouteLength(path, startIndex, endIndex, 1)
+  const reverseLength = directedRouteLength(path, startIndex, endIndex, -1)
+  const direction: 1 | -1 = forwardLength <= reverseLength ? 1 : -1
+  return (t: number) => {
+    const samples: { point: Point; length: number }[] = []
+    let total = 0
+    let index = startIndex
+    let previous = pathSegmentPointDirected(path, index, direction, 0)
+    samples.push({ point: previous, length: 0 })
+    for (let guard = 0; guard < path.nodes.length; guard++) {
+      for (let step = 1; step <= MESH_CURVE_SAMPLE_STEPS; step++) {
+        const point = pathSegmentPointDirected(path, index, direction, step / MESH_CURVE_SAMPLE_STEPS)
+        total += distance(previous, point)
+        samples.push({ point, length: total })
+        previous = point
+      }
+      index = (index + direction + path.nodes.length) % path.nodes.length
+      if (index === endIndex) break
+    }
+    if (total <= 1e-6) return samples[0].point
+    const target = total * Math.max(0, Math.min(1, t))
+    for (let i = 1; i < samples.length; i++) {
+      if (samples[i].length < target) continue
+      const prev = samples[i - 1]
+      const cur = samples[i]
+      const span = cur.length - prev.length
+      return lerp(prev.point, cur.point, span <= 1e-6 ? 0 : (target - prev.length) / span)
+    }
+    return samples[samples.length - 1].point
+  }
+}
+
+function canonicalizePath(path: RectPath, outer?: CanonicalPath): CanonicalPath {
+  const cornerNodeIndices = pickCanonicalCornerIndices(path, outer)
+  const corners = cornerNodeIndices.map((index) => path.nodes[index].point) as [Point, Point, Point, Point]
+  const boundaries = {
+    top: routeBoundary(path, cornerNodeIndices[0], cornerNodeIndices[1]),
+    right: routeBoundary(path, cornerNodeIndices[1], cornerNodeIndices[2]),
+    bottom: routeBoundary(path, cornerNodeIndices[3], cornerNodeIndices[2]),
+    left: routeBoundary(path, cornerNodeIndices[0], cornerNodeIndices[3])
+  }
+  return { path, cornerNodeIndices, corners, boundaries }
+}
+
+function rectCorners(rect: TargetRect): [Point, Point, Point, Point] {
+  return [
+    [rect.x0, rect.y0],
+    [rect.x1, rect.y0],
+    [rect.x1, rect.y1],
+    [rect.x0, rect.y1]
+  ]
+}
+
+function connectionBoundary(a: Point, b: Point): Boundary {
+  return (t) => lerp(a, b, t)
+}
+
+function makePatch(target: [Point, Point, Point, Point], boundaries: BoundarySet): MeshPatch {
+  return { target, boundaries }
+}
+
+function buildBandPatches(parent: TargetRect, child: TargetRect): MeshPatch[] {
+  const [ptl, ptr, pbr, pbl] = rectCorners(parent)
+  const [ctl, ctr, cbr, cbl] = rectCorners(child)
+  const p = parent.path
+  const c = child.path
+  return [
+    makePatch([ptl, ptr, ctr, ctl], {
+      top: p.boundaries.top,
+      right: connectionBoundary(p.corners[1], c.corners[1]),
+      bottom: c.boundaries.top,
+      left: connectionBoundary(p.corners[0], c.corners[0])
+    }),
+    makePatch([ptr, pbr, cbr, ctr], {
+      top: p.boundaries.right,
+      right: connectionBoundary(p.corners[2], c.corners[2]),
+      bottom: c.boundaries.right,
+      left: connectionBoundary(p.corners[1], c.corners[1])
+    }),
+    makePatch([pbl, pbr, cbr, cbl], {
+      top: p.boundaries.bottom,
+      right: connectionBoundary(p.corners[2], c.corners[2]),
+      bottom: c.boundaries.bottom,
+      left: connectionBoundary(p.corners[3], c.corners[3])
+    }),
+    makePatch([ptl, pbl, cbl, ctl], {
+      top: p.boundaries.left,
+      right: connectionBoundary(p.corners[3], c.corners[3]),
+      bottom: c.boundaries.left,
+      left: connectionBoundary(p.corners[0], c.corners[0])
+    })
+  ]
+}
+
+function buildNestedMeshLayout(outerPath: RectPath, innerPaths: RectPath[]): MeshLayout {
+  const outer = canonicalizePath(outerPath)
+  const width = Math.max(1, (boundaryLength(outer.boundaries.top) + boundaryLength(outer.boundaries.bottom)) / 2)
+  const height = Math.max(1, (boundaryLength(outer.boundaries.left) + boundaryLength(outer.boundaries.right)) / 2)
+  const minGap = Math.max(8, Math.min(width, height) * 0.025)
+  const sortedInnerPaths = [...innerPaths].sort((a, b) => pathArea(b) - pathArea(a))
+  const outerRect: TargetRect = { path: outer, x0: 0, y0: 0, x1: width, y1: height }
+  const rects: TargetRect[] = [outerRect]
+
+  for (const path of sortedInnerPaths) {
+    const canonical = canonicalizePath(path, outer)
+    const measuredWidth = Math.max(1, (boundaryLength(canonical.boundaries.top) + boundaryLength(canonical.boundaries.bottom)) / 2)
+    const measuredHeight = Math.max(1, (boundaryLength(canonical.boundaries.left) + boundaryLength(canonical.boundaries.right)) / 2)
+    const params = canonical.corners.map((corner) => solveBasisParam(outer.corners[0], outer.corners[1], outer.corners[3], corner))
+    const cx = width * (params.reduce((sum, param) => sum + param[0], 0) / params.length)
+    const cy = height * (params.reduce((sum, param) => sum + param[1], 0) / params.length)
+    const parent = rects[rects.length - 1]
+    const maxWidth = Math.max(1, parent.x1 - parent.x0 - minGap * 2)
+    const maxHeight = Math.max(1, parent.y1 - parent.y0 - minGap * 2)
+    const scale = Math.min(1, maxWidth / measuredWidth, maxHeight / measuredHeight)
+    const targetWidth = measuredWidth * scale
+    const targetHeight = measuredHeight * scale
+    const x0 = Math.max(parent.x0 + minGap, Math.min(parent.x1 - minGap - targetWidth, cx - targetWidth / 2))
+    const y0 = Math.max(parent.y0 + minGap, Math.min(parent.y1 - minGap - targetHeight, cy - targetHeight / 2))
+    rects.push({
+      path: canonical,
+      x0,
+      y0,
+      x1: x0 + targetWidth,
+      y1: y0 + targetHeight
+    })
+  }
+
+  const patches: MeshPatch[] = []
+  for (let i = 0; i < rects.length - 1; i++) {
+    patches.push(...buildBandPatches(rects[i], rects[i + 1]))
+  }
+  const smallest = rects[rects.length - 1]
+  patches.push(makePatch(rectCorners(smallest), smallest.path.boundaries))
+  return { width, height, rects, patches }
+}
+
+function bilinearPoint(corners: [Point, Point, Point, Point], u: number, v: number): Point {
+  const [p0, p1, p2, p3] = corners
+  return add(
+    add(mul(p0, (1 - u) * (1 - v)), mul(p1, u * (1 - v))),
+    add(mul(p2, u * v), mul(p3, (1 - u) * v))
   )
-  const regularization = scale * scale * TPS_SMOOTHING
-
-  for (let i = 0; i < n; i++) {
-    for (let j = 0; j < n; j++) matrix[i][j] = tpsKernel(targets[i], targets[j])
-    matrix[i][i] += regularization / Math.max(0.01, weights[i])
-    matrix[i][n] = 1
-    matrix[i][n + 1] = targets[i][0]
-    matrix[i][n + 2] = targets[i][1]
-    matrix[n][i] = 1
-    matrix[n + 1][i] = targets[i][0]
-    matrix[n + 2][i] = targets[i][1]
-  }
-
-  const rhsX = Array(size).fill(0)
-  const rhsY = Array(size).fill(0)
-  for (let i = 0; i < n; i++) {
-    rhsX[i] = sources[i][0]
-    rhsY[i] = sources[i][1]
-  }
-  const xWeights = solveLinearSystem(matrix, rhsX)
-  const yWeights = solveLinearSystem(matrix, rhsY)
-  if (!xWeights || !yWeights) return null
-  return { targets, xWeights, yWeights }
 }
 
-function transformTps(model: TpsModel, point: Point): Point {
-  const n = model.targets.length
-  let x = model.xWeights[n] + model.xWeights[n + 1] * point[0] + model.xWeights[n + 2] * point[1]
-  let y = model.yWeights[n] + model.yWeights[n + 1] * point[0] + model.yWeights[n + 2] * point[1]
-  for (let i = 0; i < n; i++) {
-    const k = tpsKernel(point, model.targets[i])
-    x += model.xWeights[i] * k
-    y += model.yWeights[i] * k
+function cross(a: Point, b: Point, c: Point): number {
+  return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+}
+
+function pointInConvexQuad(point: Point, corners: [Point, Point, Point, Point]): boolean {
+  const values = corners.map((corner, index) => cross(corner, corners[(index + 1) % corners.length], point))
+  const eps = 1e-6
+  return values.every((value) => value >= -eps) || values.every((value) => value <= eps)
+}
+
+function invertBilinear(corners: [Point, Point, Point, Point], point: Point): Point | null {
+  const [p0, p1, p2, p3] = corners
+  const ux = p1[0] - p0[0]
+  const uy = p1[1] - p0[1]
+  const vx = p3[0] - p0[0]
+  const vy = p3[1] - p0[1]
+  const det = ux * vy - uy * vx
+  let u = 0.5
+  let v = 0.5
+  if (Math.abs(det) > 1e-8) {
+    const px = point[0] - p0[0]
+    const py = point[1] - p0[1]
+    u = (px * vy - py * vx) / det
+    v = (ux * py - uy * px) / det
   }
-  return [x, y]
+  for (let i = 0; i < 6; i++) {
+    const current = bilinearPoint(corners, u, v)
+    const fx = current[0] - point[0]
+    const fy = current[1] - point[1]
+    if (Math.hypot(fx, fy) < 1e-4) break
+    const du = [
+      (1 - v) * (p1[0] - p0[0]) + v * (p2[0] - p3[0]),
+      (1 - v) * (p1[1] - p0[1]) + v * (p2[1] - p3[1])
+    ]
+    const dv = [
+      (1 - u) * (p3[0] - p0[0]) + u * (p2[0] - p1[0]),
+      (1 - u) * (p3[1] - p0[1]) + u * (p2[1] - p1[1])
+    ]
+    const jdet = du[0] * dv[1] - du[1] * dv[0]
+    if (Math.abs(jdet) < 1e-8) return null
+    u -= (fx * dv[1] - fy * dv[0]) / jdet
+    v -= (du[0] * fy - du[1] * fx) / jdet
+  }
+  return [Math.max(0, Math.min(1, u)), Math.max(0, Math.min(1, v))]
+}
+
+function coonsFromBoundaries(boundaries: BoundarySet, u: number, v: number): Point {
+  const top = boundaries.top(u)
+  const right = boundaries.right(v)
+  const bottom = boundaries.bottom(u)
+  const left = boundaries.left(v)
+  const tl = boundaries.top(0)
+  const tr = boundaries.top(1)
+  const br = boundaries.bottom(1)
+  const bl = boundaries.bottom(0)
+  const edgeBlend = add(lerp(top, bottom, v), lerp(left, right, u))
+  const cornerBlend = add(
+    add(mul(tl, (1 - u) * (1 - v)), mul(tr, u * (1 - v))),
+    add(mul(br, u * v), mul(bl, (1 - u) * v))
+  )
+  return sub(edgeBlend, cornerBlend)
+}
+
+function transformNestedMesh(layout: MeshLayout, point: Point): Point {
+  for (const patch of layout.patches) {
+    if (!pointInConvexQuad(point, patch.target)) continue
+    const uv = invertBilinear(patch.target, point)
+    if (!uv) continue
+    return coonsFromBoundaries(patch.boundaries, uv[0], uv[1])
+  }
+  return coonsFromBoundaries(layout.rects[0].path.boundaries, point[0] / layout.width, point[1] / layout.height)
 }
 
 function drawScaledPath(ctx: CanvasRenderingContext2D, path: RectPath, scale: number) {
@@ -447,6 +606,41 @@ function drawScaledPath(ctx: CanvasRenderingContext2D, path: RectPath, scale: nu
     )
   }
   ctx.closePath()
+}
+
+function sampleScreenPath(path: RectPath, tx: number, ty: number, scale: number): Point[] {
+  const points: Point[] = []
+  for (let i = 0; i < path.nodes.length; i++) {
+    const a = path.nodes[i]
+    const b = path.nodes[(i + 1) % path.nodes.length]
+    const cp1 = nodeOutHandle(a)
+    const cp2 = nodeInHandle(b)
+    for (let step = i === 0 ? 0 : 1; step <= CURVE_SAMPLE_STEPS; step++) {
+      const point = cubicPoint(a.point, cp1, cp2, b.point, step / CURVE_SAMPLE_STEPS)
+      points.push([point[0] * scale + tx, point[1] * scale + ty])
+    }
+  }
+  return points
+}
+
+function drawOffsetClosedPolyline(ctx: CanvasRenderingContext2D, points: Point[], offset: number) {
+  if (points.length < 2) return
+  ctx.beginPath()
+  for (let i = 0; i < points.length; i++) {
+    const prev = points[(i - 1 + points.length) % points.length]
+    const next = points[(i + 1) % points.length]
+    const dx = next[0] - prev[0]
+    const dy = next[1] - prev[1]
+    const len = Math.hypot(dx, dy) || 1
+    const point: Point = [
+      points[i][0] + (-dy / len) * offset,
+      points[i][1] + (dx / len) * offset
+    ]
+    if (i === 0) ctx.moveTo(point[0], point[1])
+    else ctx.lineTo(point[0], point[1])
+  }
+  ctx.closePath()
+  ctx.stroke()
 }
 
 function pathCacheKey(path: RectPath): string {
@@ -533,6 +727,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
   const imageRef = useRef<HTMLImageElement | null>(null)
   const viewRef = useRef<View>({ tx: 0, ty: 0, scale: 1 })
   const dragRef = useRef<Drag>(null)
+  const [editDragKey, setEditDragKey] = useState('')
   const hoverSegmentRef = useRef<HoverSegment>(null)
   const drawScheduledRef = useRef(false)
   const drawRef = useRef<() => void>(() => {})
@@ -623,10 +818,11 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
   }, [])
 
   const drawPath = useCallback(
-    (ctx: CanvasRenderingContext2D, path: RectPath, rectangleIndex: number, outerIndex: number | null, activeRectangle: number | null, alpha = 1) => {
+    (ctx: CanvasRenderingContext2D, path: RectPath, rectangleIndex: number, outerIndex: number | null, activeRectangle: number | null, editingRectangle: number | null, alpha = 1) => {
       const { tx, ty, scale } = viewRef.current
       const color = colorForRectangle(rectangleIndex, outerIndex)
       const active = activeRectangle === rectangleIndex
+      const editing = editingRectangle === rectangleIndex
       ctx.save()
       ctx.globalAlpha = alpha
       ctx.beginPath()
@@ -647,15 +843,24 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
         )
       }
       ctx.closePath()
-      ctx.fillStyle = color.fill
-      ctx.fill()
       ctx.lineJoin = 'round'
-      ctx.strokeStyle = HALO_COLOR
-      ctx.lineWidth = 5
-      ctx.stroke()
-      ctx.strokeStyle = color.stroke
-      ctx.lineWidth = 2
-      ctx.stroke()
+      if (editing) {
+        const samples = sampleScreenPath(path, tx, ty, scale)
+        ctx.strokeStyle = HALO_COLOR
+        ctx.lineWidth = ACTIVE_EDGE_WIDTH
+        ctx.lineCap = 'round'
+        ctx.lineJoin = 'round'
+        for (const offset of [-ACTIVE_EDGE_OFFSET, ACTIVE_EDGE_OFFSET]) {
+          drawOffsetClosedPolyline(ctx, samples, offset)
+        }
+      } else {
+        ctx.strokeStyle = HALO_COLOR
+        ctx.lineWidth = 5
+        ctx.stroke()
+        ctx.strokeStyle = color.stroke
+        ctx.lineWidth = 2
+        ctx.stroke()
+      }
 
       if (active && !hideGuides) {
         for (const node of path.nodes) {
@@ -711,6 +916,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
 
   const drawProjectedMesh = useCallback((ctx: CanvasRenderingContext2D, outer: RectPath, innerPaths: RectPath[], divisions: number, color: string) => {
     const safeDivisions = Math.max(2, Math.min(40, Math.round(divisions)))
+    const layout = buildNestedMeshLayout(outer, innerPaths)
     ctx.save()
     ctx.lineWidth = 1
     ctx.globalAlpha = 0.72
@@ -727,77 +933,6 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       ctx.stroke()
     }
 
-    const outerBoundaries = pathBoundaries(outer)
-    const layout = meshLayoutForPaths(outer, innerPaths)
-
-    const targets: Point[] = []
-    const sources: Point[] = []
-    const weights: number[] = []
-    const seen = new Set<string>()
-    const addConstraint = (target: Point, source: Point, weight: number) => {
-      const key = `${target[0].toFixed(3)},${target[1].toFixed(3)}`
-      if (seen.has(key)) return
-      seen.add(key)
-      targets.push(target)
-      sources.push(source)
-      weights.push(weight)
-    }
-    for (let i = 0; i <= MESH_CONSTRAINT_STEPS; i++) {
-      const t = i / MESH_CONSTRAINT_STEPS
-      addConstraint([layout.width * t, 0], outerBoundaries.top(t), OUTER_MESH_WEIGHT)
-      addConstraint([layout.width, layout.height * t], outerBoundaries.right(t), OUTER_MESH_WEIGHT)
-      addConstraint([layout.width * t, layout.height], outerBoundaries.bottom(t), OUTER_MESH_WEIGHT)
-      addConstraint([0, layout.height * t], outerBoundaries.left(t), OUTER_MESH_WEIGHT)
-      for (const innerRect of layout.innerRects) {
-        const boundaries = pathBoundaries(innerRect.path)
-        addConstraint([innerRect.x0 + (innerRect.x1 - innerRect.x0) * t, innerRect.y0], boundaries.top(t), INNER_MESH_WEIGHT)
-        addConstraint([innerRect.x1, innerRect.y0 + (innerRect.y1 - innerRect.y0) * t], boundaries.right(t), INNER_MESH_WEIGHT)
-        addConstraint([innerRect.x0 + (innerRect.x1 - innerRect.x0) * t, innerRect.y1], boundaries.bottom(t), INNER_MESH_WEIGHT)
-        addConstraint([innerRect.x0, innerRect.y0 + (innerRect.y1 - innerRect.y0) * t], boundaries.left(t), INNER_MESH_WEIGHT)
-
-        const innerX = innerRect.x0 + (innerRect.x1 - innerRect.x0) * t
-        const innerY = innerRect.y0 + (innerRect.y1 - innerRect.y0) * t
-        for (const railT of [1 / 3, 2 / 3]) {
-          addConstraint(
-            [innerX, innerRect.y0 * railT],
-            lerp(outerBoundaries.top(innerX / layout.width), boundaries.top(t), railT),
-            PARALLEL_RAIL_WEIGHT
-          )
-          addConstraint(
-            [innerX, innerRect.y1 + (layout.height - innerRect.y1) * railT],
-            lerp(boundaries.bottom(t), outerBoundaries.bottom(innerX / layout.width), railT),
-            PARALLEL_RAIL_WEIGHT
-          )
-          addConstraint(
-            [innerRect.x0 * railT, innerY],
-            lerp(outerBoundaries.left(innerY / layout.height), boundaries.left(t), railT),
-            PARALLEL_RAIL_WEIGHT
-          )
-          addConstraint(
-            [innerRect.x1 + (layout.width - innerRect.x1) * railT, innerY],
-            lerp(boundaries.right(t), outerBoundaries.right(innerY / layout.height), railT),
-            PARALLEL_RAIL_WEIGHT
-          )
-        }
-      }
-    }
-    for (let y = 1; y < 5; y++) {
-      const v = y / 5
-      for (let x = 1; x < 5; x++) {
-        const u = x / 5
-        addConstraint(
-          [layout.width * u, layout.height * v],
-          coonsPoint(outer, u, v),
-          OUTER_PRIOR_WEIGHT
-        )
-      }
-    }
-    const model = buildTpsModel(targets, sources, weights)
-    if (!model) {
-      ctx.restore()
-      return
-    }
-
     const addUnique = (values: number[], value: number) => {
       if (!values.some((existing) => Math.abs(existing - value) < 1e-6)) values.push(value)
     }
@@ -807,11 +942,11 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       gridXs.push((layout.width * i) / safeDivisions)
       gridYs.push((layout.height * i) / safeDivisions)
     }
-    for (const innerRect of layout.innerRects) {
-      addUnique(gridXs, innerRect.x0)
-      addUnique(gridXs, innerRect.x1)
-      addUnique(gridYs, innerRect.y0)
-      addUnique(gridYs, innerRect.y1)
+    for (const rect of layout.rects.slice(1)) {
+      addUnique(gridXs, rect.x0)
+      addUnique(gridXs, rect.x1)
+      addUnique(gridYs, rect.y0)
+      addUnique(gridYs, rect.y1)
     }
     gridXs.sort((a, b) => a - b)
     gridYs.sort((a, b) => a - b)
@@ -820,14 +955,14 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     for (const x of gridXs) {
       const points: Point[] = []
       for (let i = 0; i <= lineSamples; i++) {
-        points.push(transformTps(model, [x, (layout.height * i) / lineSamples]))
+        points.push(transformNestedMesh(layout, [x, (layout.height * i) / lineSamples]))
       }
       drawMeshLine(points)
     }
     for (const y of gridYs) {
       const points: Point[] = []
       for (let i = 0; i <= lineSamples; i++) {
-        points.push(transformTps(model, [(layout.width * i) / lineSamples, y]))
+        points.push(transformNestedMesh(layout, [(layout.width * i) / lineSamples, y]))
       }
       drawMeshLine(points)
     }
@@ -836,10 +971,8 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     ctx.globalAlpha = 0.95
     ctx.strokeStyle = color
     ctx.lineWidth = 1.5
-    const firstInner = layout.innerRects[0]
-    const center = firstInner
-      ? transformTps(model, [(firstInner.x0 + firstInner.x1) / 2, (firstInner.y0 + firstInner.y1) / 2])
-      : transformTps(model, [layout.width / 2, layout.height / 2])
+    const smallest = layout.rects[layout.rects.length - 1]
+    const center = transformNestedMesh(layout, [(smallest.x0 + smallest.x1) / 2, (smallest.y0 + smallest.y1) / 2])
     const [cx, cy] = imageToScreen(center[0], center[1])
     ctx.beginPath()
     ctx.arc(cx, cy, 3, 0, Math.PI * 2)
@@ -921,7 +1054,11 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       meshColor: curMeshColor
     } = propsRef.current
     const derived = deriveRectangleRoles(currentRectangles)
-    if (derived.outerPath && derived.innerPaths.length > 0 && meshVisible) {
+    const currentDrag = dragRef.current
+    const editingRectangle = currentDrag?.kind === 'node' || currentDrag?.kind === 'handle'
+      ? currentDrag.rectangleIndex
+      : null
+    if (derived.outerPath && meshVisible) {
       let effectiveMeshColor = curMeshColor
       if (curMeshColor === INVERSE_MESH_COLOR && img) {
         const key = `${src}|${imageWidth}x${imageHeight}|${derived.innerPaths.map(pathCacheKey).join('~')}`
@@ -936,7 +1073,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       drawProjectedMesh(ctx, derived.outerPath, derived.innerPaths, curMeshDivisions, effectiveMeshColor)
     }
     currentRectangles.forEach((path, index) => {
-      drawPath(ctx, path, index, derived.outerIndex, currentActiveRectangleIndex, 1)
+      drawPath(ctx, path, index, derived.outerIndex, currentActiveRectangleIndex, editingRectangle, 1)
     })
     drawDraft(ctx, currentDraft)
 
@@ -970,7 +1107,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
 
   useEffect(() => {
     requestDraw()
-  }, [containerSize, imageReady, rectangles, draft, activeRectangleIndex, tool, hideGuides, showMesh, meshDivisions, meshColor, requestDraw])
+  }, [containerSize, imageReady, rectangles, draft, activeRectangleIndex, tool, hideGuides, showMesh, meshDivisions, meshColor, editDragKey, requestDraw])
 
   const findSegmentHit = useCallback((rectangleIndex: number, screenPoint: Point): HoverSegment => {
     const path = pathForIndex(rectangleIndex)
@@ -1000,6 +1137,26 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     }
     return best
   }, [imageToScreen, pathForIndex])
+
+  const findSegmentHitAny = useCallback((screenPoint: Point): HoverSegment => {
+    const { activeRectangleIndex: activeIndex, rectangles: currentRectangles } = propsRef.current
+    const indices = activeIndex === null
+      ? currentRectangles.map((_, index) => index)
+      : [activeIndex, ...currentRectangles.map((_, index) => index).filter((index) => index !== activeIndex)]
+    let best: HoverSegment = null
+    let bestDistance = SEGMENT_HIT_RADIUS
+    for (const rectangleIndex of indices) {
+      const hit = findSegmentHit(rectangleIndex, screenPoint)
+      if (!hit) continue
+      const screenHit = imageToScreen(hit.point[0], hit.point[1])
+      const hitDistance = distance(screenPoint, screenHit)
+      if (hitDistance < bestDistance) {
+        bestDistance = hitDistance
+        best = hit
+      }
+    }
+    return best
+  }, [findSegmentHit, imageToScreen])
 
   const findEditHitForRectangle = useCallback((rectangleIndex: number, screenPoint: Point): Drag => {
     const path = pathForIndex(rectangleIndex)
@@ -1075,47 +1232,51 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       }
 
       if (isRectangleTool(tool)) {
-        const editHit = findEditHit(screenPoint)
-        if (editHit && editHit.kind !== 'pan') {
-          onActivateRectangle(editHit.rectangleIndex)
-          dragRef.current = editHit
-          canvas.setPointerCapture(e.pointerId)
-          return
-        }
-
-        const activeRectangle = propsRef.current.activeRectangleIndex
-        if (activeRectangle !== null && pathForIndex(activeRectangle)) {
-          const segmentHit = findSegmentHit(activeRectangle, screenPoint)
-          if (segmentHit) {
-            const node: BezierNode = {
-              point: clampPoint(segmentHit.point, imageWidth, imageHeight),
-              handle: defaultNodeHandle(segmentHit.tangent),
-              corner: false
-            }
-            const path = pathForIndex(activeRectangle)
-            const insertAt = path && segmentHit.segmentIndex === path.nodes.length - 1 ? path.nodes.length : segmentHit.segmentIndex + 1
-            onInsertNode(activeRectangle, segmentHit.segmentIndex, node)
-            dragRef.current = { kind: 'node', rectangleIndex: activeRectangle, nodeIndex: insertAt }
-            canvas.setPointerCapture(e.pointerId)
-            requestDraw()
-            return
-          }
-        }
-
-        if (propsRef.current.activeRectangleIndex === null) {
+        if (propsRef.current.draft.length > 0) {
           onAppendCorner(clampPoint(screenToImage(screenPoint[0], screenPoint[1]), imageWidth, imageHeight))
           requestDraw()
           return
         }
+
+        const editHit = findEditHit(screenPoint)
+        if (editHit && editHit.kind !== 'pan') {
+          onActivateRectangle(editHit.rectangleIndex)
+          dragRef.current = editHit
+          setEditDragKey(`${editHit.kind}:${editHit.rectangleIndex}:${editHit.nodeIndex}`)
+          canvas.setPointerCapture(e.pointerId)
+          return
+        }
+
+        const segmentHit = findSegmentHitAny(screenPoint)
+        if (segmentHit) {
+          const node: BezierNode = {
+            point: clampPoint(segmentHit.point, imageWidth, imageHeight),
+            handle: defaultNodeHandle(segmentHit.tangent),
+            corner: false
+          }
+          const path = pathForIndex(segmentHit.rectangleIndex)
+          const insertAt = path && segmentHit.segmentIndex === path.nodes.length - 1 ? path.nodes.length : segmentHit.segmentIndex + 1
+          onInsertNode(segmentHit.rectangleIndex, segmentHit.segmentIndex, node)
+          dragRef.current = { kind: 'node', rectangleIndex: segmentHit.rectangleIndex, nodeIndex: insertAt }
+          setEditDragKey(`node:${segmentHit.rectangleIndex}:${insertAt}`)
+          canvas.setPointerCapture(e.pointerId)
+          requestDraw()
+          return
+        }
+
+        onAppendCorner(clampPoint(screenToImage(screenPoint[0], screenPoint[1]), imageWidth, imageHeight))
+        requestDraw()
+        return
       }
 
       dragRef.current = { kind: 'pan', lastX: screenPoint[0], lastY: screenPoint[1] }
+      setEditDragKey('')
       canvas.setPointerCapture(e.pointerId)
     },
     [
       findEditHit,
       findDeleteHit,
-      findSegmentHit,
+      findSegmentHitAny,
       imageHeight,
       imageWidth,
       onActivateRectangle,
@@ -1138,13 +1299,13 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       const drag = dragRef.current
 
       if (!drag) {
-        const activeRectangle = propsRef.current.activeRectangleIndex
-        const editHit = isRectangleTool(tool) ? findEditHit(screenPoint) : null
-        const segmentHit = isRectangleTool(tool) && !editHit && activeRectangle !== null ? findSegmentHit(activeRectangle, screenPoint) : null
+        const drawingDraft = propsRef.current.draft.length > 0
+        const editHit = isRectangleTool(tool) && !drawingDraft ? findEditHit(screenPoint) : null
+        const segmentHit = isRectangleTool(tool) && !drawingDraft && !editHit ? findSegmentHitAny(screenPoint) : null
         hoverSegmentRef.current = segmentHit
         if (editHit?.kind === 'node' || editHit?.kind === 'handle') canvas.style.cursor = 'grab'
         else if (segmentHit) canvas.style.cursor = 'copy'
-        else if (isRectangleTool(tool) && activeRectangle === null) canvas.style.cursor = 'crosshair'
+        else if (isRectangleTool(tool)) canvas.style.cursor = 'crosshair'
         else canvas.style.cursor = tool === 'pan' ? 'grab' : 'default'
         requestDraw()
         return
@@ -1177,7 +1338,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     },
     [
       findEditHit,
-      findSegmentHit,
+      findSegmentHitAny,
       imageHeight,
       imageWidth,
       onHandleChange,
@@ -1194,6 +1355,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       const canvas = canvasRef.current
       if (canvas?.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId)
       dragRef.current = null
+      setEditDragKey('')
       requestDraw()
     },
     [requestDraw]
@@ -1215,7 +1377,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       if (e.ctrlKey || e.metaKey) {
         const factor = Math.exp(-e.deltaY * 0.01)
         const v = viewRef.current
-        const nextScale = Math.max(0.05, Math.min(20, v.scale * factor))
+        const nextScale = Math.max(0.05, Math.min(40, v.scale * factor))
         const ix = (x - v.tx) / v.scale
         const iy = (y - v.ty) / v.scale
         v.scale = nextScale

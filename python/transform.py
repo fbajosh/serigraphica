@@ -18,6 +18,7 @@ PARALLEL_RAIL_WEIGHT = 0.14
 
 Point = tuple[float, float]
 ProgressCallback = Callable[[float, str], None]
+BOUNDARY_SAMPLE_COUNT = 513
 
 
 def _emit_progress(progress: ProgressCallback | None, percent: float, stage: str) -> None:
@@ -131,6 +132,13 @@ def _path_segment_point(path: dict, index: int, t: float) -> Point:
     return _cubic_point(_node_point(a), _node_out_handle(a), _node_in_handle(b), _node_point(b), t)
 
 
+def _path_segment_point_directed(path: dict, index: int, direction: int, t: float) -> Point:
+    if direction == 1:
+        return _path_segment_point(path, index, t)
+    previous_index = (index - 1 + len(path["nodes"])) % len(path["nodes"])
+    return _path_segment_point(path, previous_index, 1 - t)
+
+
 def _point_on_side(path: dict, side_index: int, t: float) -> Point:
     segments = _side_segment_indices(path, side_index)
     if not segments:
@@ -220,6 +228,298 @@ def _path_center(path: dict) -> Point:
         sum(point[0] for point in corners) / len(corners),
         sum(point[1] for point in corners) / len(corners),
     )
+
+
+def _basis_param(tl: Point, tr: Point, bl: Point, point: Point) -> Point:
+    ux, uy = tr[0] - tl[0], tr[1] - tl[1]
+    vx, vy = bl[0] - tl[0], bl[1] - tl[1]
+    px, py = point[0] - tl[0], point[1] - tl[1]
+    det = ux * vy - uy * vx
+    if abs(det) < 1e-6:
+        return (0.5, 0.5)
+    return ((px * vy - py * vx) / det, (ux * py - uy * px) / det)
+
+
+def _pick_canonical_corner_indices(path: dict, outer: dict | None = None) -> list[int]:
+    entries = []
+    for node_index in path["cornerIndices"]:
+        point = _node_point(path["nodes"][int(node_index)])
+        coord = _basis_param(outer["corners"][0], outer["corners"][1], outer["corners"][3], point) if outer else point
+        entries.append({"node_index": int(node_index), "point": point, "coord": coord})
+
+    def pick(score, reverse: bool = False) -> int:
+        return sorted(entries, key=score, reverse=reverse)[0]["node_index"]
+
+    ordered = [
+        pick(lambda entry: entry["coord"][0] + entry["coord"][1]),
+        pick(lambda entry: entry["coord"][0] - entry["coord"][1], True),
+        pick(lambda entry: entry["coord"][0] + entry["coord"][1], True),
+        pick(lambda entry: entry["coord"][0] - entry["coord"][1]),
+    ]
+    if len(set(ordered)) == 4:
+        return ordered
+
+    center = (
+        sum(entry["coord"][0] for entry in entries) / len(entries),
+        sum(entry["coord"][1] for entry in entries) / len(entries),
+    )
+    by_angle = sorted(entries, key=lambda entry: np.arctan2(entry["coord"][1] - center[1], entry["coord"][0] - center[0]))
+    start_index = min(range(len(by_angle)), key=lambda i: by_angle[i]["coord"][0] + by_angle[i]["coord"][1])
+    return [entry["node_index"] for entry in (by_angle[start_index:] + by_angle[:start_index])]
+
+
+def _directed_route_length(path: dict, start_index: int, end_index: int, direction: int) -> float:
+    total = 0.0
+    index = start_index
+    previous = _path_segment_point_directed(path, index, direction, 0)
+    for _ in range(len(path["nodes"])):
+        for step in range(1, MESH_CURVE_SAMPLE_STEPS + 1):
+            point = _path_segment_point_directed(path, index, direction, step / MESH_CURVE_SAMPLE_STEPS)
+            total += _dist(previous, point)
+            previous = point
+        index = (index + direction + len(path["nodes"])) % len(path["nodes"])
+        if index == end_index:
+            break
+    return total
+
+
+def _route_boundary(path: dict, start_index: int, end_index: int):
+    forward_length = _directed_route_length(path, start_index, end_index, 1)
+    reverse_length = _directed_route_length(path, start_index, end_index, -1)
+    direction = 1 if forward_length <= reverse_length else -1
+
+    def boundary(t: float) -> Point:
+        previous = _path_segment_point_directed(path, start_index, direction, 0)
+        total = 0.0
+        samples: list[tuple[Point, float]] = [(previous, 0.0)]
+        index = start_index
+        for _ in range(len(path["nodes"])):
+            for step in range(1, MESH_CURVE_SAMPLE_STEPS + 1):
+                point = _path_segment_point_directed(path, index, direction, step / MESH_CURVE_SAMPLE_STEPS)
+                total += _dist(previous, point)
+                samples.append((point, total))
+                previous = point
+            index = (index + direction + len(path["nodes"])) % len(path["nodes"])
+            if index == end_index:
+                break
+        if total <= 1e-6:
+            return samples[0][0]
+        target = total * max(0.0, min(1.0, t))
+        for i in range(1, len(samples)):
+            if samples[i][1] < target:
+                continue
+            prev_point, prev_len = samples[i - 1]
+            cur_point, cur_len = samples[i]
+            span = cur_len - prev_len
+            return _lerp(prev_point, cur_point, 0 if span <= 1e-6 else (target - prev_len) / span)
+        return samples[-1][0]
+
+    return boundary
+
+
+def _canonicalize_path(path: dict, outer: dict | None = None) -> dict:
+    corner_indices = _pick_canonical_corner_indices(path, outer)
+    corners = [_node_point(path["nodes"][index]) for index in corner_indices]
+    boundaries = {
+        "top": _route_boundary(path, corner_indices[0], corner_indices[1]),
+        "right": _route_boundary(path, corner_indices[1], corner_indices[2]),
+        "bottom": _route_boundary(path, corner_indices[3], corner_indices[2]),
+        "left": _route_boundary(path, corner_indices[0], corner_indices[3]),
+    }
+    return {"path": path, "corner_indices": corner_indices, "corners": corners, "boundaries": boundaries}
+
+
+def _target_rect_corners(rect: dict) -> list[Point]:
+    return [
+        (rect["x0"], rect["y0"]),
+        (rect["x1"], rect["y0"]),
+        (rect["x1"], rect["y1"]),
+        (rect["x0"], rect["y1"]),
+    ]
+
+
+def _connection_boundary(a: Point, b: Point):
+    return lambda t: _lerp(a, b, t)
+
+
+def _sample_boundary(boundary) -> np.ndarray:
+    return np.array([boundary(i / (BOUNDARY_SAMPLE_COUNT - 1)) for i in range(BOUNDARY_SAMPLE_COUNT)], dtype=np.float64)
+
+
+def _make_patch(target: list[Point], boundaries: dict) -> dict:
+    return {
+        "target": np.array(target, dtype=np.float64),
+        "samples": {name: _sample_boundary(boundary) for name, boundary in boundaries.items()},
+    }
+
+
+def _band_patches(parent: dict, child: dict) -> list[dict]:
+    ptl, ptr, pbr, pbl = _target_rect_corners(parent)
+    ctl, ctr, cbr, cbl = _target_rect_corners(child)
+    p = parent["path"]
+    c = child["path"]
+    return [
+        _make_patch([ptl, ptr, ctr, ctl], {
+            "top": p["boundaries"]["top"],
+            "right": _connection_boundary(p["corners"][1], c["corners"][1]),
+            "bottom": c["boundaries"]["top"],
+            "left": _connection_boundary(p["corners"][0], c["corners"][0]),
+        }),
+        _make_patch([ptr, pbr, cbr, ctr], {
+            "top": p["boundaries"]["right"],
+            "right": _connection_boundary(p["corners"][2], c["corners"][2]),
+            "bottom": c["boundaries"]["right"],
+            "left": _connection_boundary(p["corners"][1], c["corners"][1]),
+        }),
+        _make_patch([pbl, pbr, cbr, cbl], {
+            "top": p["boundaries"]["bottom"],
+            "right": _connection_boundary(p["corners"][2], c["corners"][2]),
+            "bottom": c["boundaries"]["bottom"],
+            "left": _connection_boundary(p["corners"][3], c["corners"][3]),
+        }),
+        _make_patch([ptl, pbl, cbl, ctl], {
+            "top": p["boundaries"]["left"],
+            "right": _connection_boundary(p["corners"][3], c["corners"][3]),
+            "bottom": c["boundaries"]["left"],
+            "left": _connection_boundary(p["corners"][0], c["corners"][0]),
+        }),
+    ]
+
+
+def _build_nested_mesh_layout(outer_path: dict, inner_paths: list[dict]) -> dict:
+    outer = _canonicalize_path(outer_path)
+    width = max(1.0, (_boundary_length(outer["boundaries"]["top"]) + _boundary_length(outer["boundaries"]["bottom"])) / 2)
+    height = max(1.0, (_boundary_length(outer["boundaries"]["left"]) + _boundary_length(outer["boundaries"]["right"])) / 2)
+    min_gap = max(8.0, min(width, height) * 0.025)
+    rects = [{"path": outer, "x0": 0.0, "y0": 0.0, "x1": width, "y1": height}]
+
+    for path in sorted(inner_paths, key=_path_area, reverse=True):
+        canonical = _canonicalize_path(path, outer)
+        measured_width = max(1.0, (_boundary_length(canonical["boundaries"]["top"]) + _boundary_length(canonical["boundaries"]["bottom"])) / 2)
+        measured_height = max(1.0, (_boundary_length(canonical["boundaries"]["left"]) + _boundary_length(canonical["boundaries"]["right"])) / 2)
+        params = [_basis_param(outer["corners"][0], outer["corners"][1], outer["corners"][3], corner) for corner in canonical["corners"]]
+        cx = width * (sum(param[0] for param in params) / len(params))
+        cy = height * (sum(param[1] for param in params) / len(params))
+        parent = rects[-1]
+        max_width = max(1.0, parent["x1"] - parent["x0"] - min_gap * 2)
+        max_height = max(1.0, parent["y1"] - parent["y0"] - min_gap * 2)
+        scale = min(1.0, max_width / measured_width, max_height / measured_height)
+        target_width = measured_width * scale
+        target_height = measured_height * scale
+        x0 = max(parent["x0"] + min_gap, min(parent["x1"] - min_gap - target_width, cx - target_width / 2))
+        y0 = max(parent["y0"] + min_gap, min(parent["y1"] - min_gap - target_height, cy - target_height / 2))
+        rects.append({"path": canonical, "x0": x0, "y0": y0, "x1": x0 + target_width, "y1": y0 + target_height})
+
+    patches = []
+    for i in range(len(rects) - 1):
+        patches.extend(_band_patches(rects[i], rects[i + 1]))
+    smallest = rects[-1]
+    patches.append(_make_patch(_target_rect_corners(smallest), smallest["path"]["boundaries"]))
+    outer_patch = _make_patch(_target_rect_corners(rects[0]), rects[0]["path"]["boundaries"])
+    return {"width": width, "height": height, "rects": rects, "patches": patches, "outer_patch": outer_patch}
+
+
+def _cross_array(a: np.ndarray, b: np.ndarray, points: np.ndarray) -> np.ndarray:
+    return (b[0] - a[0]) * (points[:, 1] - a[1]) - (b[1] - a[1]) * (points[:, 0] - a[0])
+
+
+def _points_in_quad(points: np.ndarray, corners: np.ndarray) -> np.ndarray:
+    values = np.stack([
+        _cross_array(corners[i], corners[(i + 1) % 4], points)
+        for i in range(4)
+    ], axis=1)
+    eps = 1e-6
+    return np.all(values >= -eps, axis=1) | np.all(values <= eps, axis=1)
+
+
+def _bilinear_point_array(corners: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
+    p0, p1, p2, p3 = corners
+    return (
+        p0[None, :] * ((1 - u) * (1 - v))[:, None]
+        + p1[None, :] * (u * (1 - v))[:, None]
+        + p2[None, :] * (u * v)[:, None]
+        + p3[None, :] * (((1 - u) * v))[:, None]
+    )
+
+
+def _invert_bilinear_array(corners: np.ndarray, points: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    p0, p1, p2, p3 = corners
+    ux, uy = p1 - p0
+    vx, vy = p3 - p0
+    det = ux * vy - uy * vx
+    if abs(det) < 1e-8:
+        u = np.full(points.shape[0], 0.5, dtype=np.float64)
+        v = np.full(points.shape[0], 0.5, dtype=np.float64)
+    else:
+        px = points[:, 0] - p0[0]
+        py = points[:, 1] - p0[1]
+        u = (px * vy - py * vx) / det
+        v = (ux * py - uy * px) / det
+
+    valid = np.ones(points.shape[0], dtype=bool)
+    for _ in range(6):
+        current = _bilinear_point_array(corners, u, v)
+        f = current - points
+        du = (p1 - p0)[None, :] * (1 - v)[:, None] + (p2 - p3)[None, :] * v[:, None]
+        dv = (p3 - p0)[None, :] * (1 - u)[:, None] + (p2 - p1)[None, :] * u[:, None]
+        jdet = du[:, 0] * dv[:, 1] - du[:, 1] * dv[:, 0]
+        step_valid = np.abs(jdet) > 1e-8
+        valid &= step_valid
+        safe = np.where(step_valid, jdet, 1.0)
+        u -= (f[:, 0] * dv[:, 1] - f[:, 1] * dv[:, 0]) / safe
+        v -= (du[:, 0] * f[:, 1] - du[:, 1] * f[:, 0]) / safe
+    return np.clip(u, 0.0, 1.0), np.clip(v, 0.0, 1.0), valid
+
+
+def _interp_sample(samples: np.ndarray, values: np.ndarray) -> np.ndarray:
+    clipped = np.clip(values, 0.0, 1.0) * (samples.shape[0] - 1)
+    idx = np.floor(clipped).astype(np.int32)
+    idx1 = np.minimum(idx + 1, samples.shape[0] - 1)
+    frac = clipped - idx
+    return samples[idx] * (1 - frac)[:, None] + samples[idx1] * frac[:, None]
+
+
+def _coons_patch_array(patch: dict, u: np.ndarray, v: np.ndarray) -> np.ndarray:
+    samples = patch["samples"]
+    top = _interp_sample(samples["top"], u)
+    right = _interp_sample(samples["right"], v)
+    bottom = _interp_sample(samples["bottom"], u)
+    left = _interp_sample(samples["left"], v)
+    tl = samples["top"][0]
+    tr = samples["top"][-1]
+    br = samples["bottom"][-1]
+    bl = samples["bottom"][0]
+    edge_blend = top * (1 - v)[:, None] + bottom * v[:, None] + left * (1 - u)[:, None] + right * u[:, None]
+    corner_blend = (
+        tl[None, :] * ((1 - u) * (1 - v))[:, None]
+        + tr[None, :] * (u * (1 - v))[:, None]
+        + br[None, :] * (u * v)[:, None]
+        + bl[None, :] * (((1 - u) * v))[:, None]
+    )
+    return edge_blend - corner_blend
+
+
+def _transform_nested_chunk(layout: dict, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    out = np.empty_like(points, dtype=np.float64)
+    assigned = np.zeros(points.shape[0], dtype=bool)
+    for patch in layout["patches"]:
+        candidates = np.where(~assigned & _points_in_quad(points, patch["target"]))[0]
+        if candidates.size == 0:
+            continue
+        u, v, valid = _invert_bilinear_array(patch["target"], points[candidates])
+        valid_candidates = candidates[valid]
+        if valid_candidates.size == 0:
+            continue
+        out[valid_candidates] = _coons_patch_array(patch, u[valid], v[valid])
+        assigned[valid_candidates] = True
+
+    if not np.all(assigned):
+        fallback = layout["outer_patch"]
+        missing = np.where(~assigned)[0]
+        u = np.clip(points[missing, 0] / max(1.0, layout["width"]), 0.0, 1.0)
+        v = np.clip(points[missing, 1] / max(1.0, layout["height"]), 0.0, 1.0)
+        out[missing] = _coons_patch_array(fallback, u, v)
+    return out[:, 0], out[:, 1]
 
 
 def _mesh_layout(outer_path: dict, inner_paths: list[dict]) -> dict:
@@ -469,22 +769,23 @@ def export_dewarped(
         return result
 
     _emit_progress(progress, 10, "Building mesh")
-    layout, targets, weights_x, weights_y = _build_dewarp_model(outer_path, inner_paths)
+    layout = _build_nested_mesh_layout(outer_path, inner_paths)
     _emit_progress(progress, 18, "Generating map")
     width = max(1, int(round(layout["width"])))
     height = max(1, int(round(layout["height"])))
 
     map_x = np.empty((height, width), dtype=np.float32)
     map_y = np.empty((height, width), dtype=np.float32)
-    xs = np.arange(width, dtype=np.float64)
+    xs = np.linspace(0, layout["width"], width, dtype=np.float64)
+    y_coords = np.linspace(0, layout["height"], height, dtype=np.float64)
     chunk_rows = 48
     last_reported = 18
     for y0 in range(0, height, chunk_rows):
         y1 = min(height, y0 + chunk_rows)
-        ys = np.arange(y0, y1, dtype=np.float64)
+        ys = y_coords[y0:y1]
         grid_x, grid_y = np.meshgrid(xs, ys)
         points = np.column_stack((grid_x.ravel(), grid_y.ravel()))
-        src_x, src_y = _transform_tps_chunk(points, targets, weights_x, weights_y)
+        src_x, src_y = _transform_nested_chunk(layout, points)
         map_x[y0:y1, :] = src_x.reshape((y1 - y0, width)).astype(np.float32)
         map_y[y0:y1, :] = src_y.reshape((y1 - y0, width)).astype(np.float32)
         percent = 18 + 67 * (y1 / height)

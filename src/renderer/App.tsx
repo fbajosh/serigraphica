@@ -11,9 +11,7 @@ type Loaded = {
 
 const DEBUG_OUTLINES_KEY = 'serigraphica.manualOutlines.v3'
 const LEGACY_DEBUG_OUTLINES_KEY = 'serigraphica.manualOutlines.v2'
-const DEFAULT_ACCENT_COLOR = '#ff5e5e'
 const MESH_COLORS = ['inverse', '#ffffff', '#ff4d4d', '#ffd84d', '#5ee05e', '#4de8ff', '#4d79ff', '#ff5cff', '#000000'] as const
-const MESH_COLOR_LABELS = ['Inverse', 'White', 'Red', 'Yellow', 'Green', 'Cyan', 'Blue', 'Magenta', 'Black'] as const
 const RECTANGLE_COLORS = ['#ff5e5e', '#4ea1ff', '#4de8ff', '#5ee05e', '#ffd84d', '#ff5cff'] as const
 
 type SavedManualOutline = {
@@ -196,6 +194,7 @@ export function App() {
   const [debugMessage, setDebugMessage] = useState('')
   const [savedDebugOutline, setSavedDebugOutline] = useState<SavedManualOutlineMeta | null>(null)
   const canvasRef = useRef<CanvasHandle>(null)
+  const dewarpCancelRequestedRef = useRef(false)
   const filename = image ? imageFilename(image.path) : ''
 
   const refreshSavedDebugOutline = useCallback((targetFilename: string) => {
@@ -203,18 +202,26 @@ export function App() {
   }, [])
 
   const applyLoadedImage = useCallback((res: Loaded) => {
+    const targetFilename = imageFilename(res.path)
+    const saved = getSavedDebugOutline(targetFilename)
+    const savedRectangles = saved?.rectangles ?? []
     setImage(res)
-    setRectangles([])
-    setActiveRectangleIndex(null)
+    setRectangles(savedRectangles)
+    setActiveRectangleIndex(savedRectangles.length ? 0 : null)
     setDraft([])
     setTool('pen-rectangle')
-    setShowMesh(false)
+    setShowMesh(savedRectangles.length > 0)
     setMeshColorIndex(0)
     setZoomLevel(1)
     setDewarpPreview(null)
-    setDebugMessage('')
-    refreshSavedDebugOutline(imageFilename(res.path))
-    setStatus('Add Rectangle: click four corners around the next rectangle')
+    const sizeWarning = saved && (saved.imageWidth !== res.width || saved.imageHeight !== res.height)
+      ? ' Dimensions differ from the open image.'
+      : ''
+    setDebugMessage(saved ? `Loaded saved paths for ${targetFilename}.${sizeWarning}` : '')
+    refreshSavedDebugOutline(targetFilename)
+    setStatus(saved
+      ? `Loaded saved paths for ${targetFilename}.${sizeWarning}`
+      : 'Draw: click four corners around the next rectangle')
   }, [refreshSavedDebugOutline])
 
   const handleOpen = useCallback(async () => {
@@ -266,13 +273,17 @@ export function App() {
     setRectangles((prev) => prev.map((path, index) => (index === rectangleIndex ? updater(path) : path)))
   }, [])
 
-  const handleAddRectangle = useCallback(() => {
+  const handleDrawMode = useCallback(() => {
+    if (!image) return
+    setTool('pen-rectangle')
+    setStatus(draft.length ? `Draw: click corner ${draft.length + 1} of 4` : 'Draw: click empty canvas to start a rectangle')
+  }, [draft.length, image])
+
+  const handlePanMode = useCallback(() => {
     if (!image) return
     setDraft([])
-    setActiveRectangleIndex(null)
-    setTool('pen-rectangle')
-    setDewarpPreview(null)
-    setStatus('Add Rectangle: click corner 1 of 4')
+    setTool('pan')
+    setStatus('Pan - drag empty canvas to move the view')
   }, [image])
 
   const handleResetAll = useCallback(() => {
@@ -292,12 +303,28 @@ export function App() {
       setRectangles((prev) => [...prev, path])
       setActiveRectangleIndex(rectangles.length)
       setDraft([])
-      setStatus('Rectangle created. Drag nodes, add side nodes, or press Add Rectangle for another.')
+      setShowMesh(true)
+      setStatus('Rectangle created. Click empty canvas to draw another, or edit nodes/edges.')
     } else {
+      if (next.length === 1) setActiveRectangleIndex(null)
       setDraft(next)
-      setStatus(`Add Rectangle: click corner ${next.length + 1} of 4`)
+      setStatus(`Draw: click corner ${next.length + 1} of 4`)
     }
   }, [draft, rectangles.length])
+
+  const handleDeleteRectangle = useCallback((rectangleIndex: number) => {
+    const nextRectangles = rectangles.filter((_, index) => index !== rectangleIndex)
+    setRectangles(nextRectangles)
+    setDraft([])
+    setDewarpPreview(null)
+    setShowMesh(nextRectangles.length > 0 ? showMesh : false)
+    setActiveRectangleIndex((activeIndex) => {
+      if (activeIndex === null) return null
+      if (activeIndex === rectangleIndex) return null
+      return activeIndex > rectangleIndex ? activeIndex - 1 : activeIndex
+    })
+    setStatus('Rectangle deleted')
+  }, [rectangles, showMesh])
 
   const handleNodeChange = useCallback((rectangleIndex: number, nodeIndex: number, point: Point) => {
     setRectangleAt(rectangleIndex, (path) => movePathNode(path, nodeIndex, point))
@@ -375,6 +402,16 @@ export function App() {
   }, [image, rectangles])
 
   const handleDewarp = useCallback(async () => {
+    if (dewarpProgress) {
+      dewarpCancelRequestedRef.current = true
+      setStatus('Cancelling dewarp...')
+      try {
+        await window.serigraphica.cancelDewarp()
+      } catch (err) {
+        setStatus(`Error: ${(err as Error).message}`)
+      }
+      return
+    }
     if (!image) return
     if (dewarpPreview) {
       setDewarpPreview(null)
@@ -387,6 +424,7 @@ export function App() {
       return
     }
     setBusy(true)
+    dewarpCancelRequestedRef.current = false
     setDewarpProgress({ percent: 0, stage: 'Starting', operation: 'preview' })
     setStatus('Generating dewarp preview...')
     try {
@@ -394,16 +432,17 @@ export function App() {
       setDewarpPreview(preview)
       setStatus(`Dewarp preview ${preview.width}x${preview.height}`)
     } catch (err) {
-      setStatus(`Error: ${(err as Error).message}`)
+      setStatus(dewarpCancelRequestedRef.current ? 'Dewarp cancelled' : `Error: ${(err as Error).message}`)
     } finally {
+      dewarpCancelRequestedRef.current = false
       setDewarpProgress(null)
       setBusy(false)
     }
-  }, [dewarpPreview, image, rectangles])
+  }, [dewarpPreview, dewarpProgress, image, rectangles])
 
   const handleProjectMesh = useCallback(() => {
-    if (rectangles.length < 2) {
-      setStatus('Create at least two rectangles before projecting the mesh')
+    if (rectangles.length < 1) {
+      setStatus('Create at least one rectangle before projecting the mesh')
       return
     }
     if (dewarpPreview) {
@@ -415,7 +454,7 @@ export function App() {
     }
     setShowMesh((visible) => {
       const next = !visible
-      setStatus(next ? 'Projected mesh using all rectangles' : 'Mesh hidden')
+      setStatus(next ? 'Mesh shown' : 'Mesh hidden')
       return next
     })
   }, [dewarpPreview, rectangles.length])
@@ -444,46 +483,6 @@ export function App() {
     }
   }, [image, rectangles, refreshSavedDebugOutline])
 
-  const handleLoadDebugOutlines = useCallback(() => {
-    if (!image) return
-    const targetFilename = imageFilename(image.path)
-    const saved = getSavedDebugOutline(targetFilename)
-    if (!saved) {
-      setDebugMessage(`No saved paths for ${targetFilename}`)
-      return
-    }
-    setRectangles(saved.rectangles)
-    setDraft([])
-    setActiveRectangleIndex(saved.rectangles.length ? 0 : null)
-    setTool('pen-rectangle')
-    setShowMesh(false)
-    setDewarpPreview(null)
-    refreshSavedDebugOutline(targetFilename)
-    const sizeWarning = saved.imageWidth !== image.width || saved.imageHeight !== image.height
-      ? ' Dimensions differ from the open image.'
-      : ''
-    const message = `Paths loaded.${sizeWarning}`
-    setDebugMessage(message)
-    setStatus(message)
-  }, [image, refreshSavedDebugOutline])
-
-  const handleDeleteDebugOutlines = useCallback(() => {
-    if (!image) return
-    const targetFilename = imageFilename(image.path)
-    try {
-      const store = readDebugOutlineStore()
-      delete store[targetFilename]
-      writeDebugOutlineStore(store)
-      refreshSavedDebugOutline(targetFilename)
-      setDebugMessage(`Deleted saved paths for ${targetFilename}`)
-      setStatus(`Deleted manual paths for ${targetFilename}`)
-    } catch (err) {
-      const message = `Delete failed: ${(err as Error).message}`
-      setDebugMessage(message)
-      setStatus(message)
-    }
-  }, [image, refreshSavedDebugOutline])
-
   useEffect(() => {
     if (!image) {
       setSavedDebugOutline(null)
@@ -510,15 +509,26 @@ export function App() {
       } else if (e.key === '1' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault()
         canvasRef.current?.zoomToActualSize()
+      } else if (e.key === 'Backspace' && draft.length > 0) {
+        e.preventDefault()
+        setDraft((prev) => {
+          const next = prev.slice(0, -1)
+          setStatus(next.length ? `Draw: click corner ${next.length + 1} of 4` : 'Draw: click corner 1 of 4')
+          return next
+        })
+      } else if (e.key === 'Escape' && draft.length > 0) {
+        e.preventDefault()
+        setDraft([])
+        setStatus('Incomplete rectangle cancelled')
       } else if (e.key === 'v' || e.key === ' ') {
         setTool('pan')
-      } else if (e.key === 'a') {
-        handleAddRectangle()
+      } else if (e.key === 'a' || e.key === 'd') {
+        handleDrawMode()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [handleAddRectangle, image])
+  }, [draft.length, handleDrawMode, image])
 
   const derivedRectangles = deriveRectangles(rectangles)
   const outerCorners = pathCorners(derivedRectangles.outerPath)
@@ -527,12 +537,10 @@ export function App() {
   const dewarpActive = Boolean(dewarpPreview)
   const displayFilename = dewarpActive ? `${filename} preview` : filename
   const meshVisibleInCanvas = showMesh && !dewarpActive
-  const meshSliderColor = MESH_COLORS[meshColorIndex] === 'inverse' ? DEFAULT_ACCENT_COLOR : MESH_COLORS[meshColorIndex]
-  const meshLabelColor = MESH_COLORS[meshColorIndex] === 'inverse' ? '#fff' : meshSliderColor
-  const meshColorPercent = `${(meshColorIndex / (MESH_COLORS.length - 1)) * 100}%`
   const dewarpButtonLabel = dewarpProgress
-    ? `Dewarping (${Math.round(Math.max(0, Math.min(100, dewarpProgress.percent)))}%)`
-    : 'Dewarp Image'
+    ? `Dewarping...${Math.round(Math.max(0, Math.min(100, dewarpProgress.percent)))}%`
+    : 'Dewarp'
+  const dewarpButtonClass = dewarpProgress ? 'dewarp-button dewarp-button--busy' : 'dewarp-button'
 
   return (
     <div className="app">
@@ -542,19 +550,17 @@ export function App() {
         </div>
         <span className="sep" />
         <div className="toolbar-group">
-          <ToolButton active={tool === 'pen-rectangle'} onClick={handleAddRectangle} disabled={!image} title="Add rectangle (A)">
-            Add
+          <ToolButton active={tool === 'pen-rectangle'} onClick={handleDrawMode} disabled={!image} title="Draw rectangles">
+            Draw
           </ToolButton>
-          <button onClick={handleResetAll} disabled={!hasAnyPath}>Reset</button>
-          <ToolButton active={tool === 'pan'} onClick={() => setTool('pan')} title="Pan/move (V)">Pan</ToolButton>
-          
+          <ToolButton active={tool === 'pan'} onClick={handlePanMode} disabled={!image} title="Pan/move">
+            Pan
+          </ToolButton>
+          <button onClick={handleSaveDebugOutlines} disabled={!image || rectangles.length === 0}>Save</button>
         </div>
         <span className="sep" />
         <div className="toolbar-group">
-          <ToolButton active={showMesh} onClick={handleProjectMesh} title="Project mesh using both rectangles">
-            Generate Mesh
-          </ToolButton>
-          <ToolButton active={dewarpActive} onClick={handleDewarp} disabled={busy || !image || rectangles.length < 2} title="Toggle dewarp preview" className="dewarp-button">
+          <ToolButton active={dewarpActive} onClick={handleDewarp} disabled={!image || rectangles.length < 2 || (busy && !dewarpProgress)} title="Toggle dewarp preview" className={dewarpButtonClass}>
             {dewarpButtonLabel}
           </ToolButton>
         </div>
@@ -626,11 +632,11 @@ export function App() {
           <div style={{ color: '#ccc' }}>
             {dewarpActive && 'Dewarp preview - press Dewarp again to return to the original image'}
             {!dewarpActive && tool === 'pan' && 'Pan - drag empty canvas to move the view'}
-            {!dewarpActive && tool === 'pen-rectangle' && (draft.length ? `Add Rectangle - click corner ${draft.length + 1} of 4` : 'Rectangle tool - edit active rectangle or press Add Rectangle for a new one')}
+            {!dewarpActive && tool === 'pen-rectangle' && (draft.length ? `Draw - click corner ${draft.length + 1} of 4` : 'Draw - click empty canvas to start a rectangle, or edit existing nodes/edges')}
           </div>
         </section>
         <section>
-          <h3>Rectangles</h3>
+          <h3>Guides</h3>
           {rectangles.length === 0 && !draft.length && (
             <div style={{ color: '#666' }}>none</div>
           )}
@@ -642,19 +648,24 @@ export function App() {
               path={path}
               draftCount={0}
               active={activeRectangleIndex === index}
+              onDelete={() => handleDeleteRectangle(index)}
             />
           ))}
           {draft.length > 0 && (
             <PathRow label="Draft" color="#4ea1ff" path={null} draftCount={draft.length} active />
           )}
           <div className="path-actions">
+            <button onClick={handleResetAll} disabled={!hasAnyPath}>Reset Lines</button>
+            <ToolButton active={showMesh} onClick={handleProjectMesh} title="Project mesh using both rectangles">
+              {showMesh ? 'Hide Mesh' : 'Show Mesh'}
+            </ToolButton>
             <ToolButton active={hideGuides} onClick={() => setHideGuides((hidden) => !hidden)} title="Hide node handles">
               Hide Handles
             </ToolButton>
           </div>
         </section>
         <section>
-          <h3>Projected mesh</h3>
+          <h3>Mesh</h3>
           <div className="row">
             <label>State</label>
             <span style={{ color: meshVisibleInCanvas ? '#88ffcd' : '#666' }}>
@@ -672,25 +683,6 @@ export function App() {
             value={meshDivisions}
             onChange={(e) => setMeshDivisions(Number(e.target.value))}
             style={{ width: '100%' }}
-          />
-          <div className="row" style={{ marginTop: 10 }}>
-            <label>Color</label>
-            <span style={{ color: meshLabelColor }}>
-              {MESH_COLOR_LABELS[meshColorIndex]}
-            </span>
-          </div>
-          <input
-            type="range"
-            min={0}
-            max={MESH_COLORS.length - 1}
-            step={1}
-            value={meshColorIndex}
-            onChange={(e) => setMeshColorIndex(Number(e.target.value))}
-            className="color-slider"
-            style={{
-              '--slider-color': meshSliderColor,
-              '--slider-fill': meshColorPercent
-            } as React.CSSProperties & Record<'--slider-color' | '--slider-fill', string>}
           />
 
         </section>
@@ -725,11 +717,6 @@ export function App() {
             </>
           )}
           {debugMessage && <div className="debug-message">{debugMessage}</div>}
-          <div className="debug-actions">
-            <button onClick={handleSaveDebugOutlines} disabled={!image || rectangles.length === 0}>Save</button>
-            <button onClick={handleLoadDebugOutlines} disabled={!image || !savedDebugOutline}>Load</button>
-            <button onClick={handleDeleteDebugOutlines} disabled={!image || !savedDebugOutline}>Delete</button>
-          </div>
         </section>
       </div>
 
@@ -777,19 +764,34 @@ function PathRow({
   color,
   path,
   draftCount,
-  active = false
+  active = false,
+  onDelete
 }: {
   label: string
   color: string
   path: RectPath | null
   draftCount: number
   active?: boolean
+  onDelete?: () => void
 }) {
   const text = path ? `${path.nodes.length} nodes` : draftCount ? `${draftCount}/4 corners` : 'not started'
   return (
-    <div className="row">
+    <div className="row path-row">
       <label>{active ? `${label} *` : label}</label>
-      <span style={{ color: path || draftCount ? color : '#666' }}>{text}</span>
+      <span className="path-row-meta" style={{ color: path || draftCount ? color : '#666' }}>
+        {text}
+        {onDelete && (
+          <button
+            type="button"
+            className="path-delete"
+            title={`Delete ${label}`}
+            onClick={onDelete}
+            aria-label={`Delete ${label}`}
+          >
+            ×
+          </button>
+        )}
+      </span>
     </div>
   )
 }

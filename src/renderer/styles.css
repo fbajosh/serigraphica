@@ -71,7 +71,12 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 
 .dewarp-button {
-  min-width: 136px;
+  min-width: 78px;
+  transition: min-width 120ms ease;
+}
+
+.dewarp-button--busy {
+  min-width: 142px;
 }
 
 .main-toolbar button,
@@ -153,9 +158,31 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .row label { color: #aaa; }
 
+.path-row-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.path-delete {
+  width: auto;
+  height: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #bbb;
+  line-height: 1;
+  text-align: center;
+}
+
+.path-delete:hover {
+  background: transparent;
+  color: #fff;
+}
+
 .path-actions {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
   gap: 6px;
   margin-top: 10px;
 }

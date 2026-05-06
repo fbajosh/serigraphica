@@ -74,6 +74,7 @@ export type SerigraphicaAPI = {
     rectangles: RectPath[],
     quality: number
   ) => Promise<LoadedImage>
+  cancelDewarp: () => Promise<boolean>
   onDewarpProgress: (callback: (progress: DewarpProgress) => void) => () => void
 }
 
