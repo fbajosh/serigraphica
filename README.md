@@ -12,27 +12,52 @@ The current implementation is intentionally local-first:
 ## Workflow
 
 1. Open or drag an image into the app.
-2. Use `Draw` to mark rectangles. Draw one outer rectangle and one or more nested inner rectangles. Each rectangle is four corners first, then optional side nodes/Bezier handles can refine curved sides.
-3. Review the mesh. The largest rectangle is treated as the outer guide; smaller non-overlapping rectangles are treated as inner guide constraints.
-4. Adjust `Grid Density` for visual mesh resolution and `Grid Curve` for visible mesh-line smoothing through nested constraints.
-5. Run `Dewarp` to preview the corrected image.
-6. Optionally use `Fill` after dewarp to draw four-point masks around clips, clamp shadows, or other edge artifacts.
-7. Export to `output/<original>_corrected.jpg` or choose a path with `Export As`.
+2. If saved guide paths exist for the filename, Serigraphica loads them automatically. If not, it runs starter guide detection for the outer rectangle and largest inner rectangle.
+3. Use `Draw` to refine rectangles. Draw one outer rectangle and one or more nested inner rectangles. Each rectangle is four corners first, then optional side nodes/Bezier handles can refine curved sides.
+4. Use `Redetect` if you want the detector to refit around the current manually adjusted guide points.
+5. Review the mesh. The largest rectangle is treated as the outer guide; smaller non-overlapping rectangles are treated as inner guide constraints.
+6. Adjust `Grid Density` for visual mesh resolution and `Grid Curve` for visible mesh-line smoothing through nested constraints.
+7. Run `Dewarp` to preview the corrected image.
+8. Optionally use `Fill` after dewarp to draw four-point masks around clips, clamp shadows, or other edge artifacts.
+9. Export to `output/<original>_corrected.jpg` or choose a path with `Export As`.
 
-Guide paths are saved in browser local storage, keyed by image filename, so reopening the same filename reloads the saved rectangles.
+Guide paths are saved in browser local storage, keyed by image filename, so reopening the same filename reloads the saved rectangles instead of running detection.
 
 ## Guide Editing
 
-The guide model is a set of manually drawn rectangle paths:
+The guide model is a set of detected or manually drawn rectangle paths:
 
 - `Draw` mode starts a new rectangle by clicking four corners.
 - Completed rectangles can be edited by dragging corner nodes.
 - Clicking an existing side inserts a side node.
 - Side nodes have symmetric handles for Bezier-style curve editing.
-- Right-clicking a side node deletes it. Corner nodes are protected.
+- Auto-detected nodes store their original detector position and handle as their auto baseline.
+- Dragging a node, dragging a handle, or inserting a side node marks that node as user-touched.
+- Touched nodes use a dashed black outer ring so they are visually distinguishable from auto nodes.
+- `Redetect` sends the current guide paths to the Python detector. Touched nodes are treated as fixed constraints when candidate outer/inner rectangles are scored and refit.
+- Untouched nodes are detector-owned and may move on redetect.
+- Right-clicking a touched side node deletes it.
+- Right-clicking a touched corner resets it to its original auto position and marks it auto again.
+- Untouched corner nodes are protected.
 - The largest rectangle by area is automatically classified as the outer guide.
 - Smaller rectangles are automatically classified as inner guide constraints.
 - Rectangles are assumed to be nested, non-overlapping, non-proportional, and physically parallel counterparts on the same sheet.
+
+## Starter Detection
+
+Starter guide detection is implemented in `python/detect_guides.py`.
+
+The detector is deliberately a starting-point tool, not an authority over the user. Its job is to place usable editable guides:
+
+1. The image is downscaled to a bounded working resolution.
+2. Multiple edge maps are combined from CLAHE-enhanced luminance, Lab luminance, and HSV saturation.
+3. OpenCV contour extraction finds rectangular candidates with `findContours`, convex hulls, `approxPolyDP`, and `minAreaRect` fallback.
+4. Candidate corners are canonicalized as top-left, top-right, bottom-right, bottom-left independent of drawing or contour order.
+5. The detector selects an outer/inner pair by area, containment, centeredness, rectangularity, edge support, and nested-size constraints.
+6. Each selected candidate is converted into the current `RectPath` format: four protected corner nodes plus one editable Bezier side node per edge.
+7. Side nodes are placed by scanning along the local side normal for the strongest edge evidence and fitting a low-degree polynomial offset along the side.
+
+When `Redetect` is run after manual edits, the current guide paths are passed back into the sidecar. Touched corners contribute hard point constraints to candidate scoring. Touched side nodes constrain the corresponding candidate edge by distance-to-segment and handle alignment. The selected detector result is then merged in the renderer: touched nodes stay fixed, untouched nodes are replaced or transformed from the new detector-owned path.
 
 ## Mesh Algorithm
 
