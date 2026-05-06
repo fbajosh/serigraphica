@@ -19,6 +19,8 @@ MIN_PAIR_INNER_AREA_RATIO = 0.05
 MAX_PAIR_INNER_AREA_RATIO = 0.86
 EPSILON_SWEEP = (0.006, 0.009, 0.012, 0.016, 0.022, 0.03, 0.04, 0.055, 0.075)
 SIDE_HANDLE_FRACTION = 0.09
+CONSTRAINT_WEIGHT = 2.8
+CONSTRAINT_MAX_NORMALIZED_ERROR = 1.2
 
 
 PointArray = np.ndarray
@@ -33,6 +35,13 @@ class QuadCandidate:
     centeredness: float
     rectangularity: float
     score: float
+
+
+@dataclass(frozen=True)
+class ExistingGuide:
+    path: dict
+    area: float
+    touched_count: int
 
 
 def _order_corners(pts: PointArray) -> PointArray:
@@ -199,32 +208,182 @@ def _inside_score(inner: QuadCandidate, outer: QuadCandidate) -> float:
     return inside / len(points)
 
 
-def _select_guides(candidates: list[QuadCandidate]) -> list[QuadCandidate]:
+def _node_point(node: dict) -> PointArray:
+    point = node.get("point")
+    if point is None:
+        point = [0.0, 0.0]
+    return np.array([float(point[0]), float(point[1])], dtype=np.float64)
+
+
+def _node_handle(node: dict) -> PointArray:
+    handle = node.get("handle")
+    if handle is None:
+        handle = [0.0, 0.0]
+    return np.array([float(handle[0]), float(handle[1])], dtype=np.float64)
+
+
+def _scaled_existing_path(path: dict, scale: float) -> dict | None:
+    nodes = path.get("nodes") or []
+    corner_indices = path.get("cornerIndices") or []
+    if len(nodes) < 4 or len(corner_indices) != 4:
+        return None
+    try:
+        safe_corner_indices = [int(index) for index in corner_indices]
+    except (TypeError, ValueError):
+        return None
+    if any(index < 0 or index >= len(nodes) for index in safe_corner_indices):
+        return None
+    scaled_nodes: list[dict] = []
+    for node in nodes:
+        point = _node_point(node) * scale
+        handle = _node_handle(node) * scale
+        auto_point = node.get("autoPoint")
+        auto_handle = node.get("autoHandle")
+        scaled_nodes.append({
+            "point": point,
+            "handle": handle,
+            "autoPoint": np.array(auto_point, dtype=np.float64) * scale if auto_point else None,
+            "autoHandle": np.array(auto_handle, dtype=np.float64) * scale if auto_handle else None,
+            "corner": bool(node.get("corner")),
+            "touched": bool(node.get("touched")),
+        })
+    return {"nodes": scaled_nodes, "cornerIndices": safe_corner_indices}
+
+
+def _path_area(path: dict) -> float:
+    corners = [_node_point(path["nodes"][int(index)]) for index in path["cornerIndices"]]
+    return _polygon_area(np.array(corners, dtype=np.float64))
+
+
+def _existing_guides(rectangles: list[dict], scale: float) -> list[ExistingGuide]:
+    guides: list[ExistingGuide] = []
+    for rect in rectangles:
+        if not isinstance(rect, dict):
+            continue
+        path = _scaled_existing_path(rect, scale)
+        if path is None:
+            continue
+        touched_count = sum(1 for node in path["nodes"] if node.get("touched"))
+        guides.append(ExistingGuide(path=path, area=_path_area(path), touched_count=touched_count))
+    return sorted(guides, key=lambda guide: guide.area, reverse=True)
+
+
+def _side_nodes(path: dict, side_index: int) -> list[dict]:
+    start = int(path["cornerIndices"][side_index])
+    end = int(path["cornerIndices"][(side_index + 1) % 4])
+    out: list[dict] = []
+    index = start
+    for _ in range(len(path["nodes"])):
+        index = (index + 1) % len(path["nodes"])
+        if index == end:
+            break
+        out.append(path["nodes"][index])
+    return out
+
+
+def _point_segment_distance(point: PointArray, a: PointArray, b: PointArray) -> tuple[float, float]:
+    ab = b - a
+    length_sq = float(ab @ ab)
+    if length_sq <= 1e-9:
+        return float(np.linalg.norm(point - a)), 0.0
+    t = float(((point - a) @ ab) / length_sq)
+    clipped = max(0.0, min(1.0, t))
+    projection = a + ab * clipped
+    return float(np.linalg.norm(point - projection)), t
+
+
+def _constraint_error(candidate: QuadCandidate, guide: ExistingGuide | None) -> float:
+    if guide is None or guide.touched_count == 0:
+        return 0.0
+    path = guide.path
+    reference = max(float(np.sqrt(max(candidate.area, 1.0))), 40.0)
+    weighted_error = 0.0
+    weight_sum = 0.0
+    for corner_index, node_index in enumerate(path["cornerIndices"]):
+        node = path["nodes"][int(node_index)]
+        if not node.get("touched"):
+            continue
+        dist = float(np.linalg.norm(_node_point(node) - candidate.corners[corner_index]))
+        weighted_error += (dist / reference) * 4.0
+        weight_sum += 4.0
+
+    for side_index in range(4):
+        a = candidate.corners[side_index]
+        b = candidate.corners[(side_index + 1) % 4]
+        side = b - a
+        side_len = max(float(np.linalg.norm(side)), 1.0)
+        side_dir = side / side_len
+        for node in _side_nodes(path, side_index):
+            if not node.get("touched"):
+                continue
+            dist, t = _point_segment_distance(_node_point(node), a, b)
+            outside = max(0.0, -t, t - 1.0) * side_len
+            weighted_error += ((dist + outside) / reference) * 2.6
+            weight_sum += 2.6
+            handle = _node_handle(node)
+            handle_len = float(np.linalg.norm(handle))
+            if handle_len > 1.0:
+                alignment = abs(float((handle / handle_len) @ side_dir))
+                weighted_error += (1.0 - alignment) * 0.45
+                weight_sum += 0.45
+
+    if weight_sum <= 0:
+        return 0.0
+    return float(min(CONSTRAINT_MAX_NORMALIZED_ERROR, weighted_error / weight_sum))
+
+
+def _constraint_quality(candidate: QuadCandidate, guide: ExistingGuide | None) -> float:
+    if guide is None or guide.touched_count == 0:
+        return 0.0
+    return float(1.0 - min(1.0, _constraint_error(candidate, guide)))
+
+
+def _pair_score(outer: QuadCandidate, inner: QuadCandidate, outer_guide: ExistingGuide | None = None, inner_guide: ExistingGuide | None = None) -> float | None:
+    if outer is inner or inner.area >= outer.area:
+        return None
+    ratio = inner.area / max(outer.area, 1.0)
+    if ratio < MIN_PAIR_INNER_AREA_RATIO or ratio > MAX_PAIR_INNER_AREA_RATIO:
+        return None
+    containment = _inside_score(inner, outer)
+    if containment < 0.8:
+        return None
+    score = (
+        outer.area_frac * 3.0
+        + inner.area_frac * 1.8
+        + outer.confidence * 0.65
+        + inner.confidence * 0.85
+        + outer.centeredness * 0.25
+        + containment * 0.35
+    )
+    if outer_guide and outer_guide.touched_count:
+        score += CONSTRAINT_WEIGHT * _constraint_quality(outer, outer_guide)
+        score -= CONSTRAINT_WEIGHT * 0.75 * _constraint_error(outer, outer_guide)
+    if inner_guide and inner_guide.touched_count:
+        score += CONSTRAINT_WEIGHT * _constraint_quality(inner, inner_guide)
+        score -= CONSTRAINT_WEIGHT * 0.75 * _constraint_error(inner, inner_guide)
+    return float(score)
+
+
+def _select_guides(candidates: list[QuadCandidate], existing: list[ExistingGuide] | None = None) -> list[QuadCandidate]:
     if not candidates:
         return []
+    existing = existing or []
+    constrained = any(guide.touched_count for guide in existing[:2])
+    outer_guide = existing[0] if len(existing) > 0 else None
+    inner_guide = existing[1] if len(existing) > 1 else None
     pairs: list[tuple[float, QuadCandidate, QuadCandidate]] = []
     for outer in candidates:
         for inner in candidates:
-            if outer is inner or inner.area >= outer.area:
+            pair_score = _pair_score(outer, inner, outer_guide if constrained else None, inner_guide if constrained else None)
+            if pair_score is None:
                 continue
-            ratio = inner.area / max(outer.area, 1.0)
-            if ratio < MIN_PAIR_INNER_AREA_RATIO or ratio > MAX_PAIR_INNER_AREA_RATIO:
-                continue
-            containment = _inside_score(inner, outer)
-            if containment < 0.8:
-                continue
-            pair_score = (
-                outer.area_frac * 3.0
-                + inner.area_frac * 1.8
-                + outer.confidence * 0.65
-                + inner.confidence * 0.85
-                + outer.centeredness * 0.25
-                + containment * 0.35
-            )
-            pairs.append((float(pair_score), outer, inner))
+            pairs.append((pair_score, outer, inner))
     if pairs:
         _, outer, inner = max(pairs, key=lambda p: p[0])
         return [outer, inner]
+    if constrained and outer_guide:
+        outer = max(candidates, key=lambda c: c.score + CONSTRAINT_WEIGHT * _constraint_quality(c, outer_guide) - CONSTRAINT_WEIGHT * _constraint_error(c, outer_guide))
+        return [outer]
     return [max(candidates, key=lambda c: (c.area_frac, c.score))]
 
 
@@ -310,7 +469,7 @@ def _candidate_to_path(candidate: QuadCandidate, score_map: PointArray, scale: f
     }
 
 
-def detect_guides(image_path: str) -> dict:
+def detect_guides(image_path: str, rectangles: list[dict] | None = None) -> dict:
     img = cv2.imread(image_path, cv2.IMREAD_COLOR)
     if img is None:
         raise RuntimeError(f"failed to read image: {image_path}")
@@ -323,7 +482,9 @@ def detect_guides(image_path: str) -> dict:
         scale = 1.0
     edge_map, score_map = _build_edge_maps(work)
     candidates = _find_candidates(work, edge_map)
-    selected = _select_guides(candidates)
+    existing = _existing_guides(rectangles or [], scale)
+    constrained = any(guide.touched_count for guide in existing[:2])
+    selected = _select_guides(candidates, existing)
     rectangles = [_candidate_to_path(candidate, score_map, scale) for candidate in selected]
     confidence = float(np.mean([candidate.confidence for candidate in selected])) if selected else 0.0
     return {
@@ -332,5 +493,5 @@ def detect_guides(image_path: str) -> dict:
         "imageHeight": int(full_h),
         "confidence": confidence,
         "candidates": len(candidates),
-        "method": "contour-quad-edgefit-v1",
+        "method": "contour-quad-edgefit-constrained-v1" if constrained else "contour-quad-edgefit-v1",
     }

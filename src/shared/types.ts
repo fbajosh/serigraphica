@@ -10,6 +10,11 @@ export type BezierNode = {
   // incoming handle is point - handle.
   handle: Point
   corner: boolean
+  // Auto fields preserve the detector-owned baseline. User edits set touched,
+  // and constrained redetect leaves touched nodes fixed.
+  autoPoint?: Point
+  autoHandle?: Point
+  touched?: boolean
 }
 
 export type RectPath = {
@@ -65,7 +70,7 @@ export type SerigraphicaAPI = {
   openImage: () => Promise<LoadedImage | null>
   openImagePath: (imagePath: string) => Promise<LoadedImage>
   filePathForDrop: (file: File) => string
-  detectGuides: (imagePath: string) => Promise<DetectGuidesResult>
+  detectGuides: (imagePath: string, rectangles?: RectPath[]) => Promise<DetectGuidesResult>
   exportCorrected: (
     imagePath: string,
     corners: Quad,

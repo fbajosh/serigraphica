@@ -98,6 +98,55 @@ function pathFromCorners(corners: Point[]): RectPath {
   return { nodes, cornerIndices: [0, 1, 2, 3] }
 }
 
+function clonePoint(point: Point): Point {
+  return [point[0], point[1]]
+}
+
+function cloneNode(node: BezierNode): BezierNode {
+  return {
+    ...node,
+    point: clonePoint(node.point),
+    handle: clonePoint(node.handle),
+    autoPoint: node.autoPoint ? clonePoint(node.autoPoint) : undefined,
+    autoHandle: node.autoHandle ? clonePoint(node.autoHandle) : undefined
+  }
+}
+
+function nodeWithAutoBaseline(node: BezierNode): BezierNode {
+  return {
+    ...cloneNode(node),
+    autoPoint: clonePoint(node.point),
+    autoHandle: clonePoint(node.handle),
+    touched: false
+  }
+}
+
+function pathWithAutoBaseline(path: RectPath): RectPath {
+  return {
+    nodes: path.nodes.map(nodeWithAutoBaseline),
+    cornerIndices: [...path.cornerIndices] as [number, number, number, number]
+  }
+}
+
+function markNodeTouched(node: BezierNode): BezierNode {
+  return {
+    ...cloneNode(node),
+    autoPoint: node.autoPoint ? clonePoint(node.autoPoint) : clonePoint(node.point),
+    autoHandle: node.autoHandle ? clonePoint(node.autoHandle) : clonePoint(node.handle),
+    touched: true
+  }
+}
+
+function resetNodeToAuto(node: BezierNode): BezierNode {
+  if (!node.autoPoint) return cloneNode(node)
+  return {
+    ...cloneNode(node),
+    point: clonePoint(node.autoPoint),
+    handle: node.autoHandle ? clonePoint(node.autoHandle) : [0, 0],
+    touched: false
+  }
+}
+
 function pathCorners(path: RectPath | null): Quad | null {
   if (!path) return null
   const corners = path.cornerIndices.map((index) => path.nodes[index]?.point)
@@ -108,25 +157,32 @@ function pathCorners(path: RectPath | null): Quad | null {
 function movePathNode(path: RectPath, index: number, point: Point): RectPath {
   return {
     ...path,
-    nodes: path.nodes.map((node, i) => (i === index ? { ...node, point } : node))
+    nodes: path.nodes.map((node, i) => (i === index ? { ...markNodeTouched(node), point: clonePoint(point) } : node))
   }
 }
 
 function setPathHandle(path: RectPath, index: number, handle: Point): RectPath {
   return {
     ...path,
-    nodes: path.nodes.map((node, i) => (i === index ? { ...node, handle } : node))
+    nodes: path.nodes.map((node, i) => (i === index ? { ...markNodeTouched(node), handle: clonePoint(handle) } : node))
   }
 }
 
 function insertPathNode(path: RectPath, segmentIndex: number, node: BezierNode): RectPath {
   const insertAt = segmentIndex === path.nodes.length - 1 ? path.nodes.length : segmentIndex + 1
   const nodes = [...path.nodes]
-  nodes.splice(insertAt, 0, node)
+  nodes.splice(insertAt, 0, markNodeTouched(node))
   const cornerIndices = path.cornerIndices.map((cornerIndex) => (
     insertAt < path.nodes.length && cornerIndex >= insertAt ? cornerIndex + 1 : cornerIndex
   )) as [number, number, number, number]
   return { nodes, cornerIndices }
+}
+
+function resetPathNodeToAuto(path: RectPath, index: number): RectPath {
+  return {
+    ...path,
+    nodes: path.nodes.map((node, i) => (i === index ? resetNodeToAuto(node) : node))
+  }
 }
 
 function deletePathNode(path: RectPath, index: number): RectPath {
@@ -164,20 +220,116 @@ function deriveRectangles(rectangles: RectPath[]) {
   }
 }
 
+function sideNodeEntries(path: RectPath, sideIndex: number): Array<{ node: BezierNode; index: number }> {
+  const start = path.cornerIndices[sideIndex]
+  const end = path.cornerIndices[(sideIndex + 1) % 4]
+  const nodes: Array<{ node: BezierNode; index: number }> = []
+  let index = start
+  for (let guard = 0; guard < path.nodes.length; guard++) {
+    index = (index + 1) % path.nodes.length
+    if (index === end) break
+    nodes.push({ node: path.nodes[index], index })
+  }
+  return nodes
+}
+
+function dot(a: Point, b: Point): number {
+  return a[0] * b[0] + a[1] * b[1]
+}
+
+function sideLocalFrame(a: Point, b: Point) {
+  const dx = b[0] - a[0]
+  const dy = b[1] - a[1]
+  const length = Math.max(1e-6, Math.hypot(dx, dy))
+  const direction: Point = [dx / length, dy / length]
+  const normal: Point = [-direction[1], direction[0]]
+  return { length, direction, normal }
+}
+
+function sideT(point: Point, a: Point, b: Point): number {
+  const frame = sideLocalFrame(a, b)
+  return dot([point[0] - a[0], point[1] - a[1]], frame.direction) / frame.length
+}
+
+function pointDistance(a: Point, b: Point): number {
+  return Math.hypot(a[0] - b[0], a[1] - b[1])
+}
+
+function transformDetectedSideNode(node: BezierNode, fromA: Point, fromB: Point, toA: Point, toB: Point): BezierNode {
+  const from = sideLocalFrame(fromA, fromB)
+  const to = sideLocalFrame(toA, toB)
+  const relative: Point = [node.point[0] - fromA[0], node.point[1] - fromA[1]]
+  const t = dot(relative, from.direction) / from.length
+  const offset = dot(relative, from.normal)
+  const scale = to.length / from.length
+  const point: Point = [
+    toA[0] + to.direction[0] * to.length * t + to.normal[0] * offset * scale,
+    toA[1] + to.direction[1] * to.length * t + to.normal[1] * offset * scale
+  ]
+  const handleAlong = dot(node.handle, from.direction)
+  const handleNormal = dot(node.handle, from.normal)
+  const handle: Point = [
+    to.direction[0] * handleAlong * scale + to.normal[0] * handleNormal * scale,
+    to.direction[1] * handleAlong * scale + to.normal[1] * handleNormal * scale
+  ]
+  return nodeWithAutoBaseline({ ...node, point, handle })
+}
+
+function mergeDetectedPath(current: RectPath | undefined, detected: RectPath): RectPath {
+  const autoDetected = pathWithAutoBaseline(detected)
+  if (!current || !current.nodes.some((node) => node.touched)) return autoDetected
+
+  const nodes: BezierNode[] = []
+  const cornerIndices: [number, number, number, number] = [0, 0, 0, 0]
+  const detectedCorners = autoDetected.cornerIndices.map((index) => autoDetected.nodes[index])
+
+  for (let sideIndex = 0; sideIndex < 4; sideIndex++) {
+    const currentCorner = current.nodes[current.cornerIndices[sideIndex]]
+    const detectedCorner = detectedCorners[sideIndex]
+    cornerIndices[sideIndex] = nodes.length
+    nodes.push(currentCorner?.touched ? cloneNode(currentCorner) : cloneNode(detectedCorner))
+
+    const nextSide = (sideIndex + 1) % 4
+    const currentNextCorner = current.nodes[current.cornerIndices[nextSide]]
+    const detectedNextCorner = detectedCorners[nextSide]
+    const toA = nodes[cornerIndices[sideIndex]].point
+    const toB = currentNextCorner?.touched ? currentNextCorner.point : detectedNextCorner.point
+    const detectedA = detectedCorner.point
+    const detectedB = detectedNextCorner.point
+    const touchedSideNodes = sideNodeEntries(current, sideIndex)
+      .filter(({ node }) => node.touched)
+      .map(({ node }) => cloneNode(node))
+      .sort((a, b) => sideT(a.point, toA, toB) - sideT(b.point, toA, toB))
+
+    const autoSideNodes = sideNodeEntries(autoDetected, sideIndex)
+      .map(({ node }) => transformDetectedSideNode(node, detectedA, detectedB, toA, toB))
+      .filter((node) => !touchedSideNodes.some((touched) => (
+        Math.abs(sideT(touched.point, toA, toB) - sideT(node.point, toA, toB)) < 0.08 ||
+        pointDistance(touched.point, node.point) < 16
+      )))
+    nodes.push(
+      ...[...touchedSideNodes, ...autoSideNodes]
+        .sort((a, b) => sideT(a.point, toA, toB) - sideT(b.point, toA, toB))
+    )
+  }
+
+  return { nodes, cornerIndices }
+}
+
 function mergeDetectedRectangles(current: RectPath[], detected: RectPath[]): RectPath[] {
   if (detected.length === 0) return current
-  if (current.length === 0) return detected
+  if (current.length === 0) return detected.map(pathWithAutoBaseline)
   const sortedCurrent = current
     .map((path, index) => ({ path, index, area: pathArea(path) }))
     .sort((a, b) => b.area - a.area)
   const next = [...current]
   const outer = sortedCurrent[0]
-  if (outer) next[outer.index] = detected[0]
-  else next.push(detected[0])
+  if (outer) next[outer.index] = mergeDetectedPath(outer.path, detected[0])
+  else next.push(pathWithAutoBaseline(detected[0]))
   if (detected[1]) {
     const firstInner = sortedCurrent[1]
-    if (firstInner) next[firstInner.index] = detected[1]
-    else next.push(detected[1])
+    if (firstInner) next[firstInner.index] = mergeDetectedPath(firstInner.path, detected[1])
+    else next.push(pathWithAutoBaseline(detected[1]))
   }
   return next
 }
@@ -312,7 +464,7 @@ export function App() {
     }
     setStatus('Detecting starter guides...')
     try {
-      const result = await window.serigraphica.detectGuides(res.path)
+      const result = await window.serigraphica.detectGuides(res.path, [])
       if (applyDetectedGuides(result, [])) {
         setDebugMessage(`Auto-detected starter guides for ${targetFilename}`)
       } else {
@@ -425,7 +577,7 @@ export function App() {
     setBusy(true)
     setStatus(rectangles.length ? 'Redetecting starter guides...' : 'Detecting starter guides...')
     try {
-      const result = await window.serigraphica.detectGuides(image.path)
+      const result = await window.serigraphica.detectGuides(image.path, rectangles)
       if (!applyDetectedGuides(result, rectangles)) {
         setStatus('No guide edges detected. Draw manually.')
       } else {
@@ -492,7 +644,18 @@ export function App() {
     const node = path?.nodes[nodeIndex]
     if (!path || !node) return
     if (node.corner) {
-      setStatus('Corner nodes cannot be deleted')
+      if (node.touched) {
+        setRectangleAt(rectangleIndex, (prevPath) => resetPathNodeToAuto(prevPath, nodeIndex))
+        setActiveRectangleIndex(rectangleIndex)
+        clearDewarpOutputs()
+        setStatus('Corner reset to auto')
+      } else {
+        setStatus('Corner nodes cannot be deleted')
+      }
+      return
+    }
+    if (!node.touched) {
+      setStatus('Auto side nodes are reset by redetect; move the node before deleting it')
       return
     }
     setRectangleAt(rectangleIndex, (prevPath) => deletePathNode(prevPath, nodeIndex))
@@ -880,8 +1043,8 @@ export function App() {
             <ToolButton active={tool === 'pan'} onClick={handlePanMode} disabled={!image} title="Pan/move">
               Pan
             </ToolButton>
-            <button onClick={handleDetectGuides} disabled={!image || busy} title="Detect starter guides">
-              Detect
+            <button onClick={handleDetectGuides} disabled={!image || busy} title="Redetect starter guides">
+              Redetect
             </button>
           </div>
           <div className="rectangle-list-box">

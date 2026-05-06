@@ -33,7 +33,7 @@ def _image_meta(params: dict) -> dict:
 
 
 def _detect_guides(params: dict) -> dict:
-    return detect_guides(params["path"])
+    return detect_guides(params["path"], params.get("rectangles") or [])
 
 
 def _export_corrected(params: dict) -> dict:

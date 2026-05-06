@@ -1072,8 +1072,16 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
         const radius = node.corner ? NODE_RADIUS : NODE_RADIUS - 1
         ctx.beginPath()
         ctx.arc(sx, sy, radius + 2, 0, Math.PI * 2)
-        ctx.fillStyle = HALO_COLOR
-        ctx.fill()
+        if (node.touched) {
+          ctx.strokeStyle = HALO_COLOR
+          ctx.lineWidth = 3
+          ctx.setLineDash([4, 3])
+          ctx.stroke()
+          ctx.setLineDash([])
+        } else {
+          ctx.fillStyle = HALO_COLOR
+          ctx.fill()
+        }
         ctx.beginPath()
         ctx.arc(sx, sy, radius, 0, Math.PI * 2)
         ctx.fillStyle = node.corner ? color.stroke : SIDE_NODE_COLOR

@@ -5,7 +5,7 @@ contextBridge.exposeInMainWorld('serigraphica', {
   openImage: () => ipcRenderer.invoke('open-image'),
   openImagePath: (imagePath: string) => ipcRenderer.invoke('open-image-path', imagePath),
   filePathForDrop: (file: Parameters<typeof webUtils.getPathForFile>[0]) => webUtils.getPathForFile(file),
-  detectGuides: (imagePath: string) => ipcRenderer.invoke('detect-guides', imagePath),
+  detectGuides: (imagePath: string, rectangles?: unknown[]) => ipcRenderer.invoke('detect-guides', imagePath, rectangles),
   exportCorrected: (imagePath: string, corners: number[][], quality: number) =>
     ipcRenderer.invoke('export-corrected', imagePath, corners, quality),
   exportCorrectedAs: (imagePath: string, corners: number[][], quality: number) =>
