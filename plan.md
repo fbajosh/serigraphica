@@ -1,475 +1,303 @@
-# Serigraphica Implementation Plan
+# Serigraphica Plan: Autodetected Starter Guides
 
-This plan captures the next build sequence for the manual rectangle, mesh, dewarp, and fill workflow. Do not update `prd.md` as part of this work unless explicitly requested.
+This plan replaces the previous broad implementation plan with the next focused feature: automatically generate starter guide rectangles when no saved lines exist. The user still owns the final geometry and can adjust, clear, redraw, or redetect everything manually.
 
-## Core Model
+Do not update `prd.md` as part of this work unless explicitly requested.
 
-The user draws one or more closed rectangles on a photograph of a real physical sheet of paper. These rectangles are not loose suggestions. They are fixed slices through the same continuous paper surface.
+## Previous Plan Status
 
-Required interpretation:
+The previous plan is not completely done.
 
-- The largest rectangle is the outer paper boundary.
-- Every smaller rectangle is an interior slice of the same paper surface.
-- Rectangles are not expected to be proportional to each other. An inner rectangle can be more square while the outer rectangle is more rectangular, and that difference is real input data, not an error to normalize away.
-- Rectangles are concentric in the physical sense: smaller slices sit inside larger slices and cannot overlap or cross.
-- Each rectangle edge corresponds to the matching edge of every other rectangle: top maps to top, right to right, bottom to bottom, left to left.
-- Rectangle drawing order and winding direction must not matter. Clockwise, counter-clockwise, or arbitrary first corner should resolve to the same canonical top/right/bottom/left edge assignment.
-- Inner rectangles must be hard positional constraints, not low-weight guides.
-- Inner rectangles must retain their own target aspect and relative dimensions in the dewarped coordinate system. Do not derive an inner target rectangle by taking the outer rectangle and applying a proportional inset.
-- The final mesh must be one smooth field across the paper. It cannot be a separate inner warp pasted into an outer warp.
-- Mesh cells must never fold, overlap, swirl, or cross. If the generated mesh violates this, the app should fail visibly instead of exporting a bad image.
+Done or mostly done:
 
-## Phase 1: Dewarp Geometry Reset
+- Manual multi-rectangle guide workflow.
+- Rectangle role inference by area: largest outer, smaller inner constraints.
+- Saved guide auto-load by filename.
+- Mesh projection from nested rectangles.
+- Dewarp preview/export with progress and cancellation.
+- Increased zoom range.
+- Fill masks, fill preview, unfill/refill, and export integration.
+- Output folder and ignored model/output artifacts.
 
-Goal: replace the current soft-weighted TPS behavior with a deterministic nested-ring mapping that respects every rectangle as a hard constraint.
+Still incomplete or still evolving:
 
-### Current Issue
+- Full physical thin-sheet / Euler-elastica-style dewarp model.
+- Guaranteed no-fold/no-cross mesh validation.
+- Perfect parity between visible grid-line spline behavior and Python dewarp remap.
+- Automated tests for canonicalization, nesting, foldover detection, and sidecar workflows.
 
-The current dewarp appears to:
-
-- Rotate the output depending on path order or inferred corner order.
-- Undervalue inner rectangles because their constraints are weighted lower than outer constraints.
-- Allow grid lines to cross or swirl, especially when rectangles are drawn with different winding directions.
-- Treat inner rectangles as shape hints instead of exact measurements.
-
-### Target Algorithm
-
-Implement a canonical rectangle normalization step before mesh generation.
-
-1. Derive outer rectangle by largest area.
-2. Canonicalize the outer rectangle corners to `top-left`, `top-right`, `bottom-right`, `bottom-left` by location, not by click order.
-3. Build an outer reference frame from the canonical outer rectangle.
-4. For each smaller rectangle:
-   - Transform its corners into the outer reference frame.
-   - Sort corners into `top-left`, `top-right`, `bottom-right`, `bottom-left`.
-   - Reassign its sides to canonical `top`, `right`, `bottom`, `left`.
-   - Preserve side nodes and handles by assigning each segment to the nearest canonical side, rather than assuming the original node order is meaningful.
-5. Sort rectangles by area descending: outer, inner 1, inner 2, etc.
-6. Validate nesting:
-   - Each smaller rectangle must be inside the previous larger rectangle.
-   - Rectangles must not overlap each other except by containment.
-   - Each canonical side must remain ordered relative to its counterpart.
-7. Construct target-space rectangles independently, not as proportional copies:
-   - The outer target rectangle defines the output canvas orientation and gross bounds.
-   - Each inner target rectangle gets its own width/height from its measured physical edge lengths, not from the outer rectangle's aspect ratio.
-   - Each inner target rectangle gets its target position from its canonical location inside the outer reference frame.
-   - Preserve the fact that an inner rectangle may be more square or more rectangular than the outer rectangle.
-   - Clamp only enough to maintain nesting and non-overlap; do not force matching proportions.
-8. Generate the mesh as bands between consecutive rectangles:
-   - Band 0: outer to inner 1.
-   - Band 1: inner 1 to inner 2.
-   - Continue until the smallest inner rectangle.
-   - Optionally fill the center region inside the smallest rectangle as its own rectangular patch.
-9. For each band, interpolate between matching sides:
-   - Top-to-top, right-to-right, bottom-to-bottom, left-to-left.
-   - Sample both side curves at matching normalized arc-length parameters.
-   - Use a Coons-style patch per band so the mesh hits both boundaries exactly.
-10. Smooth transitions between bands:
-   - Boundaries shared by adjacent bands must be identical.
-   - Derivatives should be damped/smoothed enough to avoid visible kinks, but never at the cost of missing a user-entered rectangle.
-11. Add foldover validation:
-   - Compute signed area for every mesh quad.
-   - All cells must preserve the same orientation.
-   - Reject or warn if any cell has near-zero area or opposite sign.
-
-### Non-Proportional Rectangle Handling
-
-This is a core requirement. The mesh must not assume that an inner rectangle is a scaled-down version of the outer rectangle.
-
-Correct behavior:
-
-- Use each rectangle's own measured side lengths to determine its target dimensions.
-- Use canonical position inside the outer frame only to place the target rectangle, not to resize it proportionally.
-- If an inner rectangle is more square than the outer rectangle, the dewarped result should keep it more square.
-- The area between outer and inner rectangles must absorb that shape difference smoothly through the mesh.
-
-Incorrect behavior:
-
-- Computing inner target width as `outerWidth * normalizedInnerWidth`.
-- Computing inner target height as `outerHeight * normalizedInnerHeight`.
-- Forcing inner and outer aspect ratios to match.
-- Treating differences between inner and outer proportions as warp error.
-
-### Important Detail: Output Orientation
-
-Dewarp must not rotate the image unexpectedly.
-
-Use the canonical outer frame as the output orientation:
-
-- Output top edge corresponds to the physical top edge of the outer rectangle in the original image.
-- Output right edge corresponds to the physical right edge.
-- First clicked point, path winding, and side-node order must not rotate the output.
-
-### Implementation Areas
-
-Likely files:
-
-- `src/renderer/components/Canvas.tsx`
-- `src/renderer/App.tsx`
-- `src/shared/types.ts`
-- `python/transform.py`
-- `python/sidecar.py`
-
-Recommended shared concepts:
-
-- `CanonicalRectPath`
-- `CanonicalSide`
-- `CanonicalRectangleSet`
-- `normalizeRectangles(rectangles)`
-- `validateNestedRectangles(canonicalSet)`
-- `buildNestedRingMesh(canonicalSet, density)`
-- `validateMeshNoFoldovers(mesh)`
-
-Keep the JS preview mesh and Python export mesh mathematically aligned. If one changes, the other should change in the same way.
-
-### Acceptance Criteria
-
-- Dewarp output does not rotate when the same rectangle is drawn from a different starting corner.
-- Dewarp output does not swirl when one rectangle is clockwise and another is counter-clockwise.
-- Mesh lines never cross for valid nested rectangles.
-- Every drawn rectangle edge is hit exactly by the mesh.
-- Inner rectangles are visibly respected as hard constraints.
-- Inner rectangles remain smaller than the outer rectangle while preserving their own aspect/dimensions rather than being forced into the outer rectangle's proportions.
-- Invalid rectangle layouts fail with a clear status message rather than producing a corrupted preview/export.
-
-## Phase 2: Mesh and Top Bar UI
-
-Goal: make mesh visibility and drawing workflow match the current intended use.
-
-### Mesh Defaults
-
-- Mesh should default to visible once the first rectangle is completed.
-- Mesh should update live as rectangles, nodes, or handles move.
-- Mesh button label should be dynamic:
-  - `Hide Mesh` when mesh is visible.
-  - `Show Mesh` when mesh is hidden.
-- If the dewarp preview is active and the user clicks Mesh, return to the original image with mesh visible. This should behave like pressing Dewarp again, but specifically returns to the mesh screen.
-
-### Add/Pan Workflow
-
-Remove the separate `Pan` button from the top bar.
-
-Use one dynamic button:
-
-- Shows `Add` when not actively adding a rectangle.
-- Shows `Pan` when Add mode is active.
-- Clicking `Add` enters rectangle-add mode.
-- Clicking `Pan` exits add mode and returns to pan/edit mode.
-
-### Save/Reset
-
-Top bar order for this cluster:
-
-- `Add` / `Pan`
-- `Reset`
-- `Save`
-
-`Reset` resets all rectangles. `Save` saves current paths by filename.
-
-### Dewarp Button Width
-
-The Dewarp button should have two width states:
-
-- Compact width for `Dewarp`.
-- Wider width for `Dewarping...NN%`.
-
-Do not permanently reserve the wider progress width when the button simply says `Dewarp`.
-
-### Acceptance Criteria
-
-- Completing the first rectangle turns mesh on.
-- Mesh button says exactly what clicking it will do.
-- Add/Pan is one button and does not leave the user trapped in add mode.
-- Save works from the top bar.
-- Dewarp button only expands during active dewarp progress.
-
-## Phase 3: Saved Paths Behavior
-
-Goal: remove manual debug-path loading friction.
-
-### Open Image Behavior
+## Goal
 
 When an image opens:
 
-1. Determine filename.
-2. Check saved paths by filename.
-3. If saved paths exist, load them automatically.
-4. If image dimensions differ from the saved metadata, still load but show a warning in status/debug info.
+1. If saved guide lines exist for that filename, load them.
+2. If no saved guide lines exist, automatically detect starter guide lines.
+3. The starter guides include:
+   - outer polygon corners,
+   - outermost-inner polygon corners,
+   - one Bezier side node per edge on each detected polygon.
+4. The user can manually adjust all detected nodes and handles.
+5. The user can clear detected/manual guides and rerun detection.
 
-### Right Panel Cleanup
+This is a starting-point feature, not a return to fully automated edge detection. Detection proposes editable guide geometry; the user remains responsible for final placement.
 
-Remove:
+## UI Changes
 
-- `Load` button.
-- `Delete` button.
+### Guides Section
 
-Keep:
+Change current guide controls to:
 
-- Saved path metadata display.
-- Current rectangle count.
-- Saved rectangle count.
-- Saved timestamp.
-- Size metadata.
-- Last save/load status.
+- `Draw | Pan | Detect`
+- rectangle list
+- `Clear Lines | Save Lines`
+- `Hide Mesh | Hide Handles`
 
-### Acceptance Criteria
+Specific changes:
 
-- Opening a previously saved image restores its paths without pressing Load.
-- User can save updated paths from the top bar.
-- There is no Delete button for saved paths.
-- Right panel still provides enough debug visibility to know what was loaded.
+- Rename `Reset Lines` to `Clear Lines`.
+- Add `Detect` next to `Pan`.
+- `Detect` is disabled when no image is loaded or another operation is busy.
+- `Clear Lines` removes all current rectangles, draft points, dewarp/fill outputs, and mesh state as the current reset behavior does.
+- If the user clicks `Detect` when lines already exist, detection should move/update existing lines to match the new detection.
+- If the user wants a fully manual flow, they can click `Clear Lines`, then use `Draw`.
 
-## Phase 4: Cancelable Dewarp
+### Open Image Behavior
 
-Goal: clicking the progress-state Dewarp button cancels the active dewarp.
+On image load:
 
-### Behavior
+1. Load saved guide paths by filename if they exist.
+2. If saved paths exist, do not run autodetect.
+3. If saved paths do not exist, run guide detection automatically.
+4. If detection succeeds, show the detected rectangles and turn mesh on.
+5. If detection fails, leave the image open in `Draw` mode and show an actionable status message.
 
-- During dewarp, the button reads `Dewarping...NN%`.
-- Clicking it cancels the operation.
-- After cancel:
-  - Return to original image/mesh view.
-  - Clear dewarp progress.
-  - Set status to `Dewarp cancelled`.
-  - Keep rectangles and mesh unchanged.
+### Existing Lines + Detect
 
-### Practical Implementation
+Detection produces up to two rectangles:
 
-The current Python sidecar dewarp is a blocking CPU operation. The simplest reliable cancel path is:
+- detected outer,
+- detected outermost-inner.
 
-1. Add a cancel command in Electron.
-2. If a dewarp is active, kill/restart the sidecar process.
-3. Reject the pending sidecar call with a cancellation error.
-4. Renderer catches that error and treats it as user cancellation, not failure.
+When lines already exist:
 
-Later improvement:
+- Update the current largest rectangle with detected outer.
+- Update the current largest non-outer rectangle with detected outermost-inner.
+- If either target rectangle is missing, create it.
+- Preserve additional smaller inner rectangles for now. Future detection can support additional inner rectangles, but this feature only detects the outer and largest inner.
 
-- Add cooperative cancellation inside Python map generation.
-- That requires the sidecar to process cancel requests while dewarp is running, likely through threading, multiprocessing, or a separate worker process.
+## Data Model
 
-### Acceptance Criteria
+Add a sidecar result type conceptually shaped like:
 
-- Clicking `Dewarping...NN%` stops the operation.
-- The app remains usable after cancel.
-- A later dewarp can be started without restarting the app.
-- Cancel does not clear rectangles or saved paths.
+```ts
+type DetectGuidesResult = {
+  rectangles: RectPath[]
+  confidence: number
+  diagnostics?: {
+    outerConfidence?: number
+    innerConfidence?: number
+    messages?: string[]
+  }
+}
+```
 
-## Phase 5: Zoom Limit
+Detected `RectPath` format:
 
-Goal: allow closer inspection while editing nodes and fill masks.
+- Four protected corner nodes.
+- One editable side node per edge.
+- Corner indices point to the four corner nodes.
+- Side nodes are inserted between corners.
 
-Tasks:
+Recommended node order:
 
-- Find the current max zoom clamp in `Canvas`.
-- Double the maximum zoom.
-- Ensure all zoom paths use the same limit:
-  - Wheel/trackpad zoom.
-  - Button-driven zoom.
-  - Programmatic zoom helpers.
+```text
+TL, top side node, TR, right side node, BR, bottom side node, BL, left side node
+```
 
-Acceptance criteria:
+Recommended `cornerIndices`:
 
-- User can zoom in twice as far as before.
-- Fit and 100% still work.
-- Panning remains stable at max zoom.
+```ts
+[0, 2, 4, 6]
+```
 
-## Phase 6: Fill Feature
+Side node handles:
 
-Goal: allow the user to mask clips, clamps, and shadows along the paper edge, then fill those regions with plausible canvas-paper texture before dewarp.
+- Use symmetric handles.
+- Estimate side-node tangent from the detected side polyline.
+- Handle length should be conservative, roughly `15-25%` of the adjacent side segment length.
+- Corners remain corner nodes with zero handles.
 
-### Model Choice
+## Sidecar API
 
-Use the OpenCV Hugging Face LaMa package instead of the original full PyTorch LaMa repository:
+Add an Electron/preload/sidecar method:
 
-- Repository: `https://huggingface.co/opencv/inpainting_lama`
-- Model file: `inpainting_lama_2025jan.onnx`
-- Python wrapper uses OpenCV DNN with `cv.dnn.readNetFromONNX`.
+```ts
+detectGuides(imagePath: string): Promise<DetectGuidesResult>
+```
 
-This is likely simpler than integrating `advimman/lama` because it avoids the full PyTorch/Hydra project. Caveat: the Hugging Face README indicates OpenCV `>=5.0.0`; the current local venv has OpenCV `4.13.0`. Verify compatibility early. If OpenCV 4.13 cannot run the ONNX model, use ONNX Runtime or upgrade/build OpenCV 5.
+Python sidecar method:
 
-### Fill Use Case
-
-The input image is a photograph of a serigraph: silkscreen ink on off-white canvas paper clipped to a board/easel. The user marks clips, clamps, and shadows to remove. These regions are usually near the edge of the sheet:
-
-- One side of the masked area may touch the image edge.
-- The other sides are surrounded by off-white textured canvas.
-- Clips may be white but include shadows and hard metal edges.
-
-### UI
-
-Add a `Fill` section to the right panel.
-
-Controls:
-
-- `Add`
-- `Reset`
-- `Fill` / `Unfill` / `Refill`
-
-Shape behavior:
-
-- User clicks `Add`, then clicks four points to define a polygon.
-- No bezier handles.
-- No protected corners.
-- Right-click deletes points.
-- Once four points are placed, the shape is complete.
-- Clicking again after completion starts another shape when Fill Add mode is active.
-- Unlimited shapes are allowed.
-- Shapes cannot overlap.
-- `Reset` removes all fill shapes and clears fill preview.
-
-Button state:
-
-- `Fill`: no fill has been run yet.
-- `Unfill`: fill has been applied and no shapes changed.
-- `Refill`: fill was applied, then user moved, added, or removed fill shapes.
-
-### Data Model
-
-Add types:
-
-- `FillPoint = [number, number]`
-- `FillShape = { points: [FillPoint, FillPoint, FillPoint, FillPoint] }`
-- `FillState = 'empty' | 'dirty' | 'filled'`
-
-Renderer state:
-
-- `fillShapes`
-- `draftFillPoints`
-- `fillModeActive`
-- `filledImage`
-- `fillState`
-
-### Image Pipeline
-
-Fill should happen before dewarp.
-
-Pipeline:
-
-1. Original loaded image.
-2. Optional filled image generated from fill masks.
-3. Mesh/dewarp operates on the filled image when present.
-4. Export uses filled image when present.
-
-This keeps rectangle coordinates stable because filling does not alter dimensions.
-
-### Mask Generation
-
-Python sidecar should:
-
-1. Read original image.
-2. Rasterize fill polygons into a binary mask.
-3. Optionally dilate/feather the mask slightly to remove hard clip edges and shadows.
-4. Run LaMa inpainting.
-5. Return a same-size filled preview image.
-
-For performance and texture quality:
-
-- Prefer crop-based inpainting around each mask or connected mask group.
-- Expand crop bounds by a generous margin so the model sees enough canvas texture.
-- Composite the filled crop back into the full image.
-- Avoid resizing the entire source image to 512x512 if possible, because that may soften paper grain.
-
-### Sidecar API
-
-Add methods:
-
-- `preview_filled`
-- `export_filled` if needed, though preview output can also be used as the active image source.
-
-Parameters:
-
-- `path`
-- `fill_shapes`
-- `output_path`
-- optional model path/settings
+```json
+{
+  "method": "detect_guides",
+  "params": {
+    "path": "/path/to/image.jpg"
+  }
+}
+```
 
 Return:
 
-- `outputPath`
-- `outputWidth`
-- `outputHeight`
+```json
+{
+  "rectangles": [...],
+  "confidence": 0.0,
+  "diagnostics": {...}
+}
+```
 
-### Model Storage
+## Detection Algorithm
 
-Recommended:
+The detector should optimize for useful starter geometry, not perfect final geometry.
 
-- Add `models/` to `.gitignore`.
-- Add `models/.gitkeep` if the folder should exist.
-- Store `inpainting_lama_2025jan.onnx` locally but do not commit the 92 MB model.
-- Add clear error messaging if the model is missing.
+### Preprocessing
 
-Do not add automatic network downloading until explicitly requested. The app can first report the required model path and expected filename.
+Use OpenCV in Python:
 
-### Acceptance Criteria
+1. Load image in color.
+2. Downscale to a working size for speed, preserving scale factor.
+3. Convert to multiple color spaces as needed:
+   - grayscale for gradient edges,
+   - Lab for paper/background and print/paper contrast,
+   - HSV if saturation helps isolate printed artwork.
+4. Build edge maps:
+   - Canny edge detector,
+   - Sobel/Scharr gradient magnitude,
+   - optional adaptive threshold edges.
+5. Morphologically close small gaps, but keep enough detail to preserve page/artwork borders.
 
-- User can draw multiple four-point fill masks.
-- Right-click deletes fill points.
-- Fill masks cannot overlap.
-- Fill preview replaces clips/shadows without changing image dimensions.
-- `Unfill` restores the original image.
-- Editing fill shapes after filling changes button to `Refill`.
-- Dewarp/export use the filled image if Fill is active.
-- Missing model produces a clear, actionable error.
+### Outer Polygon Corners
 
-## Phase 7: Verification Strategy
+Find a starter outer paper rectangle:
 
-### Unit/Smoke Tests
+1. Search for large contours in the edge/threshold maps.
+2. Prefer contours/quads with:
+   - large area,
+   - roughly rectangular topology,
+   - four strong corner regions,
+   - location near the paper boundary,
+   - plausible aspect ratio,
+   - non-self-intersection.
+3. Also run line-segment detection or Hough-style line candidates as a fallback.
+4. Build candidate quadrilaterals from contour approximation and/or line intersections.
+5. Score candidates by:
+   - area,
+   - edge support along the candidate sides,
+   - corner strength,
+   - color/brightness contrast across the side,
+   - nesting relationship with inner candidates.
+6. Canonicalize selected corners to top-left, top-right, bottom-right, bottom-left in image space.
 
-Add or run checks for:
+### Outermost-Inner Polygon Corners
 
-- Rectangle canonicalization with clockwise and counter-clockwise inputs.
-- Same rectangle from different starting corners.
-- Nested rectangle validation.
-- Mesh foldover detection.
-- Fill polygon overlap detection.
-- Sidecar dewarp progress and cancel behavior.
+Find the largest inner rectangle inside the outer paper rectangle:
 
-### Manual Tests
+1. Restrict search to the selected outer polygon interior.
+2. Detect prominent rectangular contours corresponding to the artwork/print boundary.
+3. Prefer the largest valid candidate that is fully inside the outer polygon.
+4. Reject candidates that touch or nearly touch the outer edge.
+5. Score candidates by:
+   - area inside outer,
+   - strong edge support,
+   - printed-art/paper contrast,
+   - corner strength,
+   - rectangular consistency,
+   - containment inside outer.
+6. Canonicalize selected corners independently of detection order.
 
-Use saved outlines and representative raw input images.
+### Side Curve / Bezier Node Placement
 
-Test cases:
+For each detected polygon edge:
 
-- One outer rectangle only.
-- Outer plus one inner rectangle.
-- Outer plus multiple inner rectangles.
-- Inner rectangles drawn in opposite winding order from outer.
-- Rectangles drawn from different first corners.
-- Highly warped but valid nested rectangles.
-- Invalid overlapping rectangles.
-- Dewarp cancel at early and late progress.
-- Fill before dewarp.
-- Unfill/refill cycle.
+1. Extract a narrow search corridor around the edge chord.
+2. Within the corridor, trace the strongest supported edge path between the two detected corners.
+3. Use dynamic programming, shortest path over edge cost, or sampled maximum-gradient tracking to get an edge polyline.
+4. Smooth the polyline lightly to remove noise.
+5. Choose the side node:
+   - Prefer the point of maximum perpendicular deviation from the straight chord.
+   - If deviation is tiny, use the arc-length midpoint.
+6. Estimate tangent at the side node from neighboring polyline samples.
+7. Convert tangent to the symmetric handle vector used by the current guide editor.
 
-### Commands
+Important behavior:
 
-Run after each major phase:
+- The Bezier node is just an editable starting estimate.
+- Do not overfit high-frequency texture, clip shadows, or printed design details.
+- One side node per edge is enough for this feature.
+
+## Integration Steps
+
+1. Add shared API/types for `detectGuides`.
+2. Add Electron preload method and main-process IPC handler.
+3. Add Python sidecar `detect_guides` handler.
+4. Implement Python detection in a new module, likely `python/detect_guides.py`.
+5. Convert detector output into current `RectPath` shape.
+6. Add renderer `handleDetectGuides`.
+7. Call `handleDetectGuides` automatically from image-open flow only when no saved paths exist.
+8. Add `Detect` button beside `Pan`.
+9. Rename `Reset Lines` to `Clear Lines`.
+10. Ensure detection clears dewarp/fill outputs because guide geometry changed.
+11. Ensure saved paths always take precedence over autodetection.
+12. Add status messages for:
+    - detecting,
+    - detected outer only,
+    - detected outer + inner,
+    - failed detection,
+    - redetected existing lines.
+
+## Error Handling
+
+Detection should fail gracefully:
+
+- If no outer polygon is detected, return no rectangles and a diagnostic message.
+- If outer is detected but inner is not, return the outer rectangle and warn that the inner rectangle must be drawn manually.
+- If confidence is low, still allow showing candidates but mark the status as low confidence.
+- Never overwrite saved paths automatically.
+- Never run detection after saved paths load unless the user presses `Detect`.
+
+## Acceptance Criteria
+
+- Opening a file with saved lines loads saved lines and does not autodetect.
+- Opening a file without saved lines runs autodetection automatically.
+- Detection creates an editable outer rectangle when it finds the paper boundary.
+- Detection creates an editable outermost-inner rectangle when it finds the largest inner artwork boundary.
+- Each detected polygon has four corners plus one side Bezier node per edge.
+- Detected side nodes and handles can be manually adjusted with the existing guide editor.
+- `Clear Lines` replaces the old `Reset Lines` label and clears all guide geometry.
+- `Detect` appears next to `Pan`.
+- Pressing `Detect` with existing lines updates the outer and largest inner guides instead of requiring the user to clear first.
+- Additional smaller inner rectangles are preserved when redetecting.
+- Detection failure leaves the image open and usable for manual drawing.
+
+## Verification
+
+Run after implementation:
 
 ```sh
 npm run typecheck
-python/.venv/bin/python3 -m py_compile python/sidecar.py python/transform.py
+python/.venv/bin/python3 -m py_compile python/sidecar.py python/transform.py python/detect_guides.py
 npm run build
 git diff --check
 ```
 
-For Python algorithm changes, add a direct smoke script that constructs synthetic nested rectangles, generates a dewarp output, and asserts:
+Manual test cases:
 
-- output dimensions are positive,
-- progress reaches 100%,
-- mesh validation has no foldovers,
-- canonicalization is invariant to winding/start point.
-
-## Suggested Build Order
-
-1. Implement rectangle canonicalization and validation.
-2. Replace preview mesh with nested-ring mesh.
-3. Replace Python dewarp mesh with the same nested-ring algorithm.
-4. Add foldover detection and visible error handling.
-5. Update mesh/top-bar UI and saved-path behavior.
-6. Add cancelable dewarp.
-7. Increase max zoom.
-8. Add Fill shape drawing UI.
-9. Add Fill sidecar mask generation.
-10. Integrate OpenCV LaMa/ONNX fill.
-11. Connect filled image into dewarp/export pipeline.
-12. Final manual testing across real saved outlines.
+- Image with saved lines: confirms saved paths load and detect does not run.
+- Image without saved lines and clear paper/artwork edges: detects outer + inner.
+- Image without saved lines and no visible inner boundary: detects outer only and warns.
+- Press `Clear Lines`, then `Detect`: recreates detected starter guides.
+- Press `Detect` after manually moving guides: moves outer/largest-inner to new detected geometry.
+- Press `Detect` with additional smaller inner rectangles present: outer/largest-inner update, smaller inner rectangles remain.
+- Low contrast outer paper edge.
+- Inner print boundary with gaps or clips.
+- Rotated/counter-clockwise detected corner order: canonical output remains top/right/bottom/left.
