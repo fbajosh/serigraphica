@@ -12,6 +12,7 @@ const projectRoot = join(__dirname, '..', '..')
 const pythonScript = join(projectRoot, 'python', 'sidecar.py')
 const venvPython = join(projectRoot, 'python', '.venv', 'bin', 'python3')
 const outputDir = join(projectRoot, 'output')
+const lamaModelPath = join(projectRoot, 'models', 'inpainting_lama_2025jan.onnx')
 
 type PendingCall = {
   resolve: (value: unknown) => void
@@ -182,6 +183,12 @@ function previewOutputPath(imagePath: string) {
   return join(outputDir, `.${base}_preview.jpg`)
 }
 
+function fillPreviewOutputPath(imagePath: string) {
+  mkdirSync(outputDir, { recursive: true })
+  const base = basename(imagePath, extname(imagePath)).replace(/^\./, '').replace(/_(filled_)?preview$/, '')
+  return join(outputDir, `.${base}_filled_preview.png`)
+}
+
 async function exportCorrectedTo(imagePath: string, corners: number[][], quality: number, outputPath: string) {
   return sidecar.call('export_corrected', {
     path: imagePath,
@@ -215,6 +222,22 @@ async function exportDewarpedTo(
   }, onProgress)
 }
 
+async function previewFilledTo(imagePath: string, fillShapes: unknown[], quality: number, outputPath: string, fillSampleRegions?: unknown[]) {
+  return sidecar.call('export_filled', {
+    path: imagePath,
+    fill_shapes: fillShapes,
+    sample_regions: fillSampleRegions || [],
+    output_path: outputPath,
+    quality,
+    model_path: lamaModelPath
+  })
+}
+
+async function applyFillToOutputIfNeeded(outputPath: string, fillShapes: unknown[] | undefined, quality: number, fillSampleRegions?: unknown[]) {
+  if (!Array.isArray(fillShapes) || fillShapes.length === 0) return null
+  return previewFilledTo(outputPath, fillShapes, Math.max(quality, 96), outputPath, fillSampleRegions)
+}
+
 ipcMain.handle('open-image', async () => {
   const result = await dialog.showOpenDialog({
     title: 'Open image',
@@ -245,12 +268,15 @@ ipcMain.handle('export-corrected-as', async (_evt, imagePath: string, corners: n
   return exportCorrectedTo(imagePath, corners, quality, result.filePath)
 })
 
-ipcMain.handle('export-dewarped', async (evt, imagePath: string, rectangles: unknown[], quality: number) => {
-  return exportDewarpedTo(imagePath, rectangles, quality, correctedOutputPath(imagePath), dewarpProgressSender(evt, 'export'))
+ipcMain.handle('export-dewarped', async (evt, imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string, fillShapes?: unknown[], fillSampleRegions?: unknown[]) => {
+  const outputPath = correctedOutputPath(outputBasePath || imagePath)
+  const result = await exportDewarpedTo(imagePath, rectangles, quality, outputPath, dewarpProgressSender(evt, 'export'))
+  return await applyFillToOutputIfNeeded(outputPath, fillShapes, quality, fillSampleRegions) || result
 })
 
-ipcMain.handle('export-dewarped-as', async (evt, imagePath: string, rectangles: unknown[], quality: number) => {
-  const base = basename(imagePath, extname(imagePath))
+ipcMain.handle('export-dewarped-as', async (evt, imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string, fillShapes?: unknown[], fillSampleRegions?: unknown[]) => {
+  const basePath = outputBasePath || imagePath
+  const base = basename(basePath, extname(basePath))
   mkdirSync(outputDir, { recursive: true })
   const result = await dialog.showSaveDialog({
     title: 'Export dewarped image',
@@ -258,7 +284,8 @@ ipcMain.handle('export-dewarped-as', async (evt, imagePath: string, rectangles: 
     filters: [{ name: 'JPEG', extensions: ['jpg', 'jpeg'] }]
   })
   if (result.canceled || !result.filePath) return null
-  return exportDewarpedTo(imagePath, rectangles, quality, result.filePath, dewarpProgressSender(evt, 'export-as'))
+  const dewarped = await exportDewarpedTo(imagePath, rectangles, quality, result.filePath, dewarpProgressSender(evt, 'export-as'))
+  return await applyFillToOutputIfNeeded(result.filePath, fillShapes, quality, fillSampleRegions) || dewarped
 })
 
 ipcMain.handle('preview-corrected', async (_evt, imagePath: string, corners: number[][], quality: number) => {
@@ -275,8 +302,8 @@ ipcMain.handle('preview-corrected', async (_evt, imagePath: string, corners: num
   }
 })
 
-ipcMain.handle('preview-dewarped', async (evt, imagePath: string, rectangles: unknown[], quality: number) => {
-  const outputPath = previewOutputPath(imagePath)
+ipcMain.handle('preview-dewarped', async (evt, imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string) => {
+  const outputPath = previewOutputPath(outputBasePath || imagePath)
   const result = await exportDewarpedTo(imagePath, rectangles, quality, outputPath, dewarpProgressSender(evt, 'preview')) as {
     outputWidth: number
     outputHeight: number
@@ -286,6 +313,22 @@ ipcMain.handle('preview-dewarped', async (evt, imagePath: string, rectangles: un
     width: result.outputWidth,
     height: result.outputHeight,
     dataUrl: `local-image://localhost${outputPath}?t=${Date.now()}`
+  }
+})
+
+ipcMain.handle('preview-filled', async (_evt, imagePath: string, fillShapes: unknown[], quality: number, fillSampleRegions?: unknown[]) => {
+  const outputPath = fillPreviewOutputPath(imagePath)
+  const result = await previewFilledTo(imagePath, fillShapes, quality, outputPath, fillSampleRegions) as {
+    outputWidth: number
+    outputHeight: number
+    method?: string
+  }
+  return {
+    path: outputPath,
+    width: result.outputWidth,
+    height: result.outputHeight,
+    dataUrl: `local-image://localhost${outputPath}?t=${Date.now()}`,
+    method: result.method
   }
 })
 

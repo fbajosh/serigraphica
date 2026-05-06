@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react'
-import { Canvas, CanvasHandle } from './components/Canvas'
-import type { BezierNode, DewarpProgress, Point, Quad, RectPath, Tool } from '../shared/types'
+import { buildFillSampleRegions, Canvas, CanvasHandle } from './components/Canvas'
+import type { BezierNode, DewarpProgress, FillShape, Point, Quad, RectPath, Tool } from '../shared/types'
 
 type Loaded = {
   path: string
   width: number
   height: number
   dataUrl: string
+  method?: string
 }
 
 const DEBUG_OUTLINES_KEY = 'serigraphica.manualOutlines.v3'
@@ -175,12 +176,55 @@ function rectangleLabel(index: number, outerIndex: number | null, innerIndices: 
   return innerPosition >= 0 ? `Inner ${innerPosition + 1}` : `Rectangle ${index + 1}`
 }
 
+function cross(a: Point, b: Point, c: Point): number {
+  return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+}
+
+function pointInPolygon(point: Point, polygon: Point[]): boolean {
+  let inside = false
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const a = polygon[i]
+    const b = polygon[j]
+    const intersects = ((a[1] > point[1]) !== (b[1] > point[1])) &&
+      point[0] < ((b[0] - a[0]) * (point[1] - a[1])) / ((b[1] - a[1]) || 1e-9) + a[0]
+    if (intersects) inside = !inside
+  }
+  return inside
+}
+
+function segmentsIntersect(a: Point, b: Point, c: Point, d: Point): boolean {
+  const abC = cross(a, b, c)
+  const abD = cross(a, b, d)
+  const cdA = cross(c, d, a)
+  const cdB = cross(c, d, b)
+  return abC * abD < 0 && cdA * cdB < 0
+}
+
+function polygonsOverlap(a: Point[], b: Point[]): boolean {
+  if (a.some((point) => pointInPolygon(point, b)) || b.some((point) => pointInPolygon(point, a))) return true
+  for (let i = 0; i < a.length; i++) {
+    for (let j = 0; j < b.length; j++) {
+      if (segmentsIntersect(a[i], a[(i + 1) % a.length], b[j], b[(j + 1) % b.length])) return true
+    }
+  }
+  return false
+}
+
+function overlapsAnyFillShape(candidate: FillShape, shapes: FillShape[], ignoreIndex: number | null = null): boolean {
+  return shapes.some((shape, index) => index !== ignoreIndex && polygonsOverlap(candidate.points, shape.points))
+}
+
 export function App() {
   const [image, setImage] = useState<Loaded | null>(null)
   const [tool, setTool] = useState<Tool>('pen-rectangle')
   const [rectangles, setRectangles] = useState<RectPath[]>([])
   const [activeRectangleIndex, setActiveRectangleIndex] = useState<number | null>(null)
   const [draft, setDraft] = useState<Point[]>([])
+  const [fillShapes, setFillShapes] = useState<FillShape[]>([])
+  const [fillDraft, setFillDraft] = useState<Point[]>([])
+  const [activeFillShapeIndex, setActiveFillShapeIndex] = useState<number | null>(null)
+  const [filledImage, setFilledImage] = useState<Loaded | null>(null)
+  const [fillDirty, setFillDirty] = useState(false)
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState('Open an image to begin')
   const [hideGuides, setHideGuides] = useState(false)
@@ -209,6 +253,11 @@ export function App() {
     setRectangles(savedRectangles)
     setActiveRectangleIndex(savedRectangles.length ? 0 : null)
     setDraft([])
+    setFillShapes([])
+    setFillDraft([])
+    setActiveFillShapeIndex(null)
+    setFilledImage(null)
+    setFillDirty(false)
     setTool('pen-rectangle')
     setShowMesh(savedRectangles.length > 0)
     setMeshColorIndex(0)
@@ -275,6 +324,7 @@ export function App() {
 
   const handleDrawMode = useCallback(() => {
     if (!image) return
+    setFillDraft([])
     setTool('pen-rectangle')
     setStatus(draft.length ? `Draw: click corner ${draft.length + 1} of 4` : 'Draw: click empty canvas to start a rectangle')
   }, [draft.length, image])
@@ -282,19 +332,41 @@ export function App() {
   const handlePanMode = useCallback(() => {
     if (!image) return
     setDraft([])
+    setFillDraft([])
     setTool('pan')
     setStatus('Pan - drag empty canvas to move the view')
   }, [image])
+
+  const clearDewarpOutputs = useCallback(() => {
+    setDewarpPreview(null)
+    setFilledImage(null)
+    setFillDirty(false)
+  }, [])
+
+  const markFillDirty = useCallback(() => {
+    setFillDirty((wasDirty) => wasDirty || Boolean(filledImage))
+  }, [filledImage])
+
+  const handleFillAddMode = useCallback(() => {
+    if (!image) return
+    if (!dewarpPreview) {
+      setStatus('Dewarp before drawing fill masks')
+      return
+    }
+    setTool('fill')
+    setDraft([])
+    setStatus(fillDraft.length ? `Fill: click point ${fillDraft.length + 1} of 4` : 'Fill: click four points around the object to remove')
+  }, [dewarpPreview, fillDraft.length, image])
 
   const handleResetAll = useCallback(() => {
     setRectangles([])
     setActiveRectangleIndex(null)
     setDraft([])
-    setDewarpPreview(null)
+    clearDewarpOutputs()
     setShowMesh(false)
     setTool('pen-rectangle')
     setStatus('Reset all rectangles')
-  }, [])
+  }, [clearDewarpOutputs])
 
   const handleAppendCorner = useCallback((point: Point) => {
     const next = [...draft, point]
@@ -316,7 +388,7 @@ export function App() {
     const nextRectangles = rectangles.filter((_, index) => index !== rectangleIndex)
     setRectangles(nextRectangles)
     setDraft([])
-    setDewarpPreview(null)
+    clearDewarpOutputs()
     setShowMesh(nextRectangles.length > 0 ? showMesh : false)
     setActiveRectangleIndex((activeIndex) => {
       if (activeIndex === null) return null
@@ -324,26 +396,26 @@ export function App() {
       return activeIndex > rectangleIndex ? activeIndex - 1 : activeIndex
     })
     setStatus('Rectangle deleted')
-  }, [rectangles, showMesh])
+  }, [clearDewarpOutputs, rectangles, showMesh])
 
   const handleNodeChange = useCallback((rectangleIndex: number, nodeIndex: number, point: Point) => {
     setRectangleAt(rectangleIndex, (path) => movePathNode(path, nodeIndex, point))
     setActiveRectangleIndex(rectangleIndex)
-    setDewarpPreview(null)
-  }, [setRectangleAt])
+    clearDewarpOutputs()
+  }, [clearDewarpOutputs, setRectangleAt])
 
   const handleHandleChange = useCallback((rectangleIndex: number, nodeIndex: number, handle: Point) => {
     setRectangleAt(rectangleIndex, (path) => setPathHandle(path, nodeIndex, handle))
     setActiveRectangleIndex(rectangleIndex)
-    setDewarpPreview(null)
-  }, [setRectangleAt])
+    clearDewarpOutputs()
+  }, [clearDewarpOutputs, setRectangleAt])
 
   const handleInsertNode = useCallback((rectangleIndex: number, segmentIndex: number, node: BezierNode) => {
     setRectangleAt(rectangleIndex, (path) => insertPathNode(path, segmentIndex, node))
     setActiveRectangleIndex(rectangleIndex)
-    setDewarpPreview(null)
+    clearDewarpOutputs()
     setStatus('Rectangle node added')
-  }, [setRectangleAt])
+  }, [clearDewarpOutputs, setRectangleAt])
 
   const handleDeleteNode = useCallback((rectangleIndex: number, nodeIndex: number) => {
     const path = rectangles[rectangleIndex]
@@ -355,9 +427,94 @@ export function App() {
     }
     setRectangleAt(rectangleIndex, (prevPath) => deletePathNode(prevPath, nodeIndex))
     setActiveRectangleIndex(rectangleIndex)
-    setDewarpPreview(null)
+    clearDewarpOutputs()
     setStatus('Rectangle node deleted')
-  }, [rectangles, setRectangleAt])
+  }, [clearDewarpOutputs, rectangles, setRectangleAt])
+
+  const handleAppendFillPoint = useCallback((point: Point) => {
+    const next = [...fillDraft, point]
+    if (next.length >= 4) {
+      const shape: FillShape = { points: next.slice(0, 4) as Quad }
+      if (overlapsAnyFillShape(shape, fillShapes)) {
+        setStatus('Fill shapes cannot overlap')
+        return
+      }
+      setFillShapes((prev) => [...prev, shape])
+      setActiveFillShapeIndex(fillShapes.length)
+      setFillDraft([])
+      markFillDirty()
+      setStatus('Fill shape added. Click again to start another fill shape.')
+      return
+    }
+    setFillDraft(next)
+    setActiveFillShapeIndex(null)
+    setStatus(`Fill: click point ${next.length + 1} of 4`)
+  }, [fillDraft, fillShapes, markFillDirty])
+
+  const handleFillPointChange = useCallback((shapeIndex: number, pointIndex: number, point: Point) => {
+    const current = fillShapes[shapeIndex]
+    if (!current) return
+    const points = current.points.map((existing, index) => (index === pointIndex ? point : existing)) as Quad
+    const nextShape: FillShape = { points }
+    if (overlapsAnyFillShape(nextShape, fillShapes, shapeIndex)) {
+      setStatus('Fill shapes cannot overlap')
+      return
+    }
+    setFillShapes((prev) => prev.map((shape, index) => (index === shapeIndex ? nextShape : shape)))
+    setActiveFillShapeIndex(shapeIndex)
+    markFillDirty()
+  }, [fillShapes, markFillDirty])
+
+  const handleDeleteFillPoint = useCallback((shapeIndex: number | null, pointIndex: number) => {
+    if (shapeIndex === null) {
+      setFillDraft((prev) => prev.filter((_, index) => index !== pointIndex))
+      setStatus('Fill point deleted')
+      return
+    }
+    setFillShapes((prev) => prev.filter((_, index) => index !== shapeIndex))
+    setActiveFillShapeIndex(null)
+    markFillDirty()
+    setStatus('Fill shape deleted')
+  }, [markFillDirty])
+
+  const handleResetFill = useCallback(() => {
+    setFillShapes([])
+    setFillDraft([])
+    setActiveFillShapeIndex(null)
+    setFilledImage(null)
+    setFillDirty(false)
+    setStatus('Fill shapes reset')
+  }, [])
+
+  const handleFillAction = useCallback(async () => {
+    if (!image) return
+    if (filledImage && !fillDirty) {
+      setFilledImage(null)
+      setStatus('Fill removed')
+      return
+    }
+    if (fillShapes.length === 0) {
+      setStatus('Add at least one fill shape first')
+      return
+    }
+    if (!dewarpPreview) {
+      setStatus('Dewarp before running Fill')
+      return
+    }
+    setBusy(true)
+    setStatus(filledImage ? 'Refilling image...' : 'Filling image...')
+    try {
+      const filled = await window.serigraphica.previewFilled(dewarpPreview.path, fillShapes, 98, buildFillSampleRegions(rectangles))
+      setFilledImage(filled)
+      setFillDirty(false)
+      setTool('pan')
+      setStatus(`Fill preview ${filled.width}x${filled.height}${filled.method ? ` (${filled.method})` : ''}`)
+    } catch (err) {
+      setStatus(`Error: ${(err as Error).message}`)
+    } finally {
+      setBusy(false)
+    }
+  }, [dewarpPreview, fillDirty, fillShapes, filledImage, image, rectangles])
 
   const handleExport = useCallback(async () => {
     if (!image) return
@@ -369,14 +526,15 @@ export function App() {
     setDewarpProgress(null)
     setStatus(rectangles.length >= 2 ? 'Exporting dewarped image...' : 'Exporting perspective image...')
     try {
-      const out = await window.serigraphica.exportDewarped(image.path, rectangles, 92)
+      const exportFillShapes = filledImage || fillDirty ? fillShapes : []
+      const out = await window.serigraphica.exportDewarped(image.path, rectangles, 92, image.path, exportFillShapes, buildFillSampleRegions(rectangles))
       setStatus(`Exported ${out.outputWidth}x${out.outputHeight} -> ${out.outputPath}`)
     } catch (err) {
       setStatus(`Error: ${(err as Error).message}`)
     } finally {
       setBusy(false)
     }
-  }, [image, rectangles])
+  }, [fillDirty, fillShapes, filledImage, image, rectangles])
 
   const handleExportAs = useCallback(async () => {
     if (!image) return
@@ -388,7 +546,8 @@ export function App() {
     setDewarpProgress(null)
     setStatus(rectangles.length >= 2 ? 'Exporting dewarped image...' : 'Exporting perspective image...')
     try {
-      const out = await window.serigraphica.exportDewarpedAs(image.path, rectangles, 92)
+      const exportFillShapes = filledImage || fillDirty ? fillShapes : []
+      const out = await window.serigraphica.exportDewarpedAs(image.path, rectangles, 92, image.path, exportFillShapes, buildFillSampleRegions(rectangles))
       if (!out) {
         setStatus('Export cancelled')
         return
@@ -399,7 +558,7 @@ export function App() {
     } finally {
       setBusy(false)
     }
-  }, [image, rectangles])
+  }, [fillDirty, fillShapes, filledImage, image, rectangles])
 
   const handleDewarp = useCallback(async () => {
     if (dewarpProgress) {
@@ -416,6 +575,7 @@ export function App() {
     if (dewarpPreview) {
       setDewarpPreview(null)
       setDewarpProgress(null)
+      setTool('pan')
       setStatus('Returned to original image')
       return
     }
@@ -428,8 +588,9 @@ export function App() {
     setDewarpProgress({ percent: 0, stage: 'Starting', operation: 'preview' })
     setStatus('Generating dewarp preview...')
     try {
-      const preview = await window.serigraphica.previewDewarped(image.path, rectangles, 92)
+      const preview = await window.serigraphica.previewDewarped(image.path, rectangles, 92, image.path)
       setDewarpPreview(preview)
+      setFillDirty(Boolean(filledImage))
       setStatus(`Dewarp preview ${preview.width}x${preview.height}`)
     } catch (err) {
       setStatus(dewarpCancelRequestedRef.current ? 'Dewarp cancelled' : `Error: ${(err as Error).message}`)
@@ -438,7 +599,7 @@ export function App() {
       setDewarpProgress(null)
       setBusy(false)
     }
-  }, [dewarpPreview, dewarpProgress, image, rectangles])
+  }, [dewarpPreview, dewarpProgress, filledImage, image, rectangles])
 
   const handleProjectMesh = useCallback(() => {
     if (rectangles.length < 1) {
@@ -449,6 +610,7 @@ export function App() {
       setDewarpPreview(null)
       setDewarpProgress(null)
       setShowMesh(true)
+      setTool('pan')
       setStatus('Returned to projected mesh')
       return
     }
@@ -516,10 +678,21 @@ export function App() {
           setStatus(next.length ? `Draw: click corner ${next.length + 1} of 4` : 'Draw: click corner 1 of 4')
           return next
         })
+      } else if (e.key === 'Backspace' && fillDraft.length > 0) {
+        e.preventDefault()
+        setFillDraft((prev) => {
+          const next = prev.slice(0, -1)
+          setStatus(next.length ? `Fill: click point ${next.length + 1} of 4` : 'Fill: click point 1 of 4')
+          return next
+        })
       } else if (e.key === 'Escape' && draft.length > 0) {
         e.preventDefault()
         setDraft([])
         setStatus('Incomplete rectangle cancelled')
+      } else if (e.key === 'Escape' && fillDraft.length > 0) {
+        e.preventDefault()
+        setFillDraft([])
+        setStatus('Incomplete fill shape cancelled')
       } else if (e.key === 'v' || e.key === ' ') {
         setTool('pan')
       } else if (e.key === 'a' || e.key === 'd') {
@@ -528,15 +701,18 @@ export function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [draft.length, handleDrawMode, image])
+  }, [draft.length, fillDraft.length, handleDrawMode, image])
 
   const derivedRectangles = deriveRectangles(rectangles)
   const outerCorners = pathCorners(derivedRectangles.outerPath)
   const hasAnyPath = Boolean(rectangles.length || draft.length)
-  const displayImage = dewarpPreview ?? image
   const dewarpActive = Boolean(dewarpPreview)
+  const activeFilledImage = dewarpActive && filledImage && !fillDirty ? filledImage : null
+  const displayImage = activeFilledImage ?? dewarpPreview ?? image
   const displayFilename = dewarpActive ? `${filename} preview` : filename
   const meshVisibleInCanvas = showMesh && !dewarpActive
+  const fillOverlayVisible = dewarpActive && !activeFilledImage
+  const fillButtonLabel = filledImage ? (fillDirty ? 'Refill' : 'Unfill') : 'Fill'
   const dewarpButtonLabel = dewarpProgress
     ? `Dewarping...${Math.round(Math.max(0, Math.min(100, dewarpProgress.percent)))}%`
     : 'Dewarp'
@@ -605,9 +781,12 @@ export function App() {
             src={displayImage.dataUrl}
             imageWidth={displayImage.width}
             imageHeight={displayImage.height}
-            tool={dewarpActive ? 'pan' : tool}
+            tool={activeFilledImage ? 'pan' : dewarpActive ? (tool === 'fill' ? 'fill' : 'pan') : tool === 'fill' ? 'pan' : tool}
             rectangles={dewarpActive ? [] : rectangles}
             draft={dewarpActive ? [] : draft}
+            fillShapes={fillOverlayVisible ? fillShapes : []}
+            fillDraft={fillOverlayVisible ? fillDraft : []}
+            activeFillShapeIndex={fillOverlayVisible ? activeFillShapeIndex : null}
             activeRectangleIndex={dewarpActive ? null : activeRectangleIndex}
             hideGuides={hideGuides}
             showMesh={meshVisibleInCanvas}
@@ -620,6 +799,10 @@ export function App() {
             onInsertNode={handleInsertNode}
             onDeleteNode={handleDeleteNode}
             onActivateRectangle={setActiveRectangleIndex}
+            onAppendFillPoint={handleAppendFillPoint}
+            onFillPointChange={handleFillPointChange}
+            onDeleteFillPoint={handleDeleteFillPoint}
+            onActivateFillShape={setActiveFillShapeIndex}
           />
         ) : (
           <div className="empty-state">Open an image to begin</div>
@@ -630,7 +813,8 @@ export function App() {
         <section>
           <h3>Active tool</h3>
           <div style={{ color: '#ccc' }}>
-            {dewarpActive && 'Dewarp preview - press Dewarp again to return to the original image'}
+            {dewarpActive && tool !== 'fill' && 'Dewarp preview - press Dewarp again to return to the original image'}
+            {dewarpActive && tool === 'fill' && (fillDraft.length ? `Fill - click point ${fillDraft.length + 1} of 4` : 'Fill - click four points around clips, clamps, or shadows')}
             {!dewarpActive && tool === 'pan' && 'Pan - drag empty canvas to move the view'}
             {!dewarpActive && tool === 'pen-rectangle' && (draft.length ? `Draw - click corner ${draft.length + 1} of 4` : 'Draw - click empty canvas to start a rectangle, or edit existing nodes/edges')}
           </div>
@@ -685,6 +869,31 @@ export function App() {
             style={{ width: '100%' }}
           />
 
+        </section>
+        <section>
+          <h3>Fill</h3>
+          <div className="row">
+            <label>State</label>
+            <span style={{ color: activeFilledImage || (!dewarpActive && filledImage) ? '#88ffcd' : fillDirty ? '#f4d35e' : '#666' }}>
+              {!dewarpActive ? (filledImage ? 'filled hidden' : 'dewarp first') : activeFilledImage ? 'filled' : fillDirty ? 'needs refill' : 'not filled'}
+            </span>
+          </div>
+          <div className="row">
+            <label>Shapes</label>
+            <span>{fillShapes.length}{fillDraft.length ? ` + ${fillDraft.length}/4 draft` : ''}</span>
+          </div>
+          <div className="path-actions fill-actions">
+            <ToolButton active={dewarpActive && tool === 'fill'} onClick={handleFillAddMode} disabled={!dewarpActive || busy} title="Add fill shape">
+              Add
+            </ToolButton>
+            <button onClick={handleResetFill} disabled={!fillShapes.length && !fillDraft.length && !filledImage}>Reset</button>
+            <button onClick={handleFillAction} disabled={busy || (filledImage && !fillDirty ? false : (!dewarpActive || fillShapes.length === 0))}>
+              {fillButtonLabel}
+            </button>
+          </div>
+          <div className="panel-note">
+            Dewarp first, then draw four-point masks around clips, clamps, or shadows.
+          </div>
         </section>
         <section className="debug-section">
           <h3>File info</h3>

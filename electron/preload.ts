@@ -11,12 +11,14 @@ contextBridge.exposeInMainWorld('serigraphica', {
     ipcRenderer.invoke('export-corrected-as', imagePath, corners, quality),
   previewCorrected: (imagePath: string, corners: number[][], quality: number) =>
     ipcRenderer.invoke('preview-corrected', imagePath, corners, quality),
-  exportDewarped: (imagePath: string, rectangles: unknown[], quality: number) =>
-    ipcRenderer.invoke('export-dewarped', imagePath, rectangles, quality),
-  exportDewarpedAs: (imagePath: string, rectangles: unknown[], quality: number) =>
-    ipcRenderer.invoke('export-dewarped-as', imagePath, rectangles, quality),
-  previewDewarped: (imagePath: string, rectangles: unknown[], quality: number) =>
-    ipcRenderer.invoke('preview-dewarped', imagePath, rectangles, quality),
+  exportDewarped: (imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string, fillShapes?: unknown[], fillSampleRegions?: unknown[]) =>
+    ipcRenderer.invoke('export-dewarped', imagePath, rectangles, quality, outputBasePath, fillShapes, fillSampleRegions),
+  exportDewarpedAs: (imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string, fillShapes?: unknown[], fillSampleRegions?: unknown[]) =>
+    ipcRenderer.invoke('export-dewarped-as', imagePath, rectangles, quality, outputBasePath, fillShapes, fillSampleRegions),
+  previewDewarped: (imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string) =>
+    ipcRenderer.invoke('preview-dewarped', imagePath, rectangles, quality, outputBasePath),
+  previewFilled: (imagePath: string, fillShapes: unknown[], quality: number, fillSampleRegions?: unknown[]) =>
+    ipcRenderer.invoke('preview-filled', imagePath, fillShapes, quality, fillSampleRegions),
   cancelDewarp: () => ipcRenderer.invoke('cancel-dewarp'),
   onDewarpProgress: (callback: (progress: unknown) => void) => {
     const listener = (_event: IpcRendererEvent, progress: unknown) => callback(progress)

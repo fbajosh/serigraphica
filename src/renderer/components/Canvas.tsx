@@ -7,7 +7,7 @@ import {
   useRef,
   useState
 } from 'react'
-import type { BezierNode, Point, RectPath, Tool } from '../../shared/types'
+import type { BezierNode, FillSampleRegion, FillShape, Point, RectPath, Tool } from '../../shared/types'
 
 const NODE_RADIUS = 7 // screen px
 const NODE_HIT_RADIUS = 12 // screen px
@@ -26,6 +26,8 @@ const HALO_COLOR = 'rgba(0, 0, 0, 0.85)'
 const SIDE_NODE_COLOR = '#f4d35e'
 const ACTIVE_EDGE_OFFSET = 4
 const ACTIVE_EDGE_WIDTH = 1.4
+const FILL_COLOR = '#f4d35e'
+const FILL_ACTIVE_COLOR = '#ffe88a'
 
 type Props = {
   src: string
@@ -34,6 +36,9 @@ type Props = {
   tool: Tool
   rectangles: RectPath[]
   draft: Point[]
+  fillShapes: FillShape[]
+  fillDraft: Point[]
+  activeFillShapeIndex: number | null
   activeRectangleIndex: number | null
   hideGuides: boolean
   showMesh: boolean
@@ -46,6 +51,10 @@ type Props = {
   onInsertNode: (rectangleIndex: number, segmentIndex: number, node: BezierNode) => void
   onDeleteNode: (rectangleIndex: number, nodeIndex: number) => void
   onActivateRectangle: (rectangleIndex: number) => void
+  onAppendFillPoint: (point: Point) => void
+  onFillPointChange: (shapeIndex: number, pointIndex: number, point: Point) => void
+  onDeleteFillPoint: (shapeIndex: number | null, pointIndex: number) => void
+  onActivateFillShape: (shapeIndex: number) => void
 }
 
 export type CanvasHandle = {
@@ -59,12 +68,17 @@ type Drag =
   | { kind: 'pan'; lastX: number; lastY: number }
   | { kind: 'node'; rectangleIndex: number; nodeIndex: number }
   | { kind: 'handle'; rectangleIndex: number; nodeIndex: number; side: 'in' | 'out' }
+  | { kind: 'fill-point'; shapeIndex: number; pointIndex: number }
   | null
 
 type HoverSegment = { rectangleIndex: number; segmentIndex: number; point: Point; tangent: Point } | null
 
 function isRectangleTool(tool: Tool): boolean {
   return tool === 'pen-rectangle'
+}
+
+function isFillTool(tool: Tool): boolean {
+  return tool === 'fill'
 }
 
 function add(a: Point, b: Point): Point {
@@ -506,6 +520,20 @@ function buildNestedMeshLayout(outerPath: RectPath, innerPaths: RectPath[]): Mes
   return { width, height, rects, patches }
 }
 
+export function buildFillSampleRegions(rectangles: RectPath[]): FillSampleRegion[] {
+  const { outerPath, innerPaths } = deriveRectangleRoles(rectangles)
+  if (!outerPath || innerPaths.length === 0) return []
+  const layout = buildNestedMeshLayout(outerPath, innerPaths)
+  const largestInner = layout.rects[1]
+  if (!largestInner || largestInner.y0 <= 1) return []
+  return [{
+    x0: Math.max(0, largestInner.x0),
+    y0: 0,
+    x1: Math.min(layout.width, largestInner.x1),
+    y1: Math.min(layout.height, largestInner.y0)
+  }]
+}
+
 function bilinearPoint(corners: [Point, Point, Point, Point], u: number, v: number): Point {
   const [p0, p1, p2, p3] = corners
   return add(
@@ -707,6 +735,9 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     tool,
     rectangles,
     draft,
+    fillShapes,
+    fillDraft,
+    activeFillShapeIndex,
     activeRectangleIndex,
     hideGuides,
     showMesh,
@@ -718,7 +749,11 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     onHandleChange,
     onInsertNode,
     onDeleteNode,
-    onActivateRectangle
+    onActivateRectangle,
+    onAppendFillPoint,
+    onFillPointChange,
+    onDeleteFillPoint,
+    onActivateFillShape
   },
   ref
 ) {
@@ -735,8 +770,8 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
   const [containerSize, setContainerSize] = useState({ w: 0, h: 0 })
   const [imageReady, setImageReady] = useState(false)
 
-  const propsRef = useRef({ tool, rectangles, draft, activeRectangleIndex, hideGuides, showMesh, meshDivisions, meshColor })
-  propsRef.current = { tool, rectangles, draft, activeRectangleIndex, hideGuides, showMesh, meshDivisions, meshColor }
+  const propsRef = useRef({ tool, rectangles, draft, fillShapes, fillDraft, activeFillShapeIndex, activeRectangleIndex, hideGuides, showMesh, meshDivisions, meshColor })
+  propsRef.current = { tool, rectangles, draft, fillShapes, fillDraft, activeFillShapeIndex, activeRectangleIndex, hideGuides, showMesh, meshDivisions, meshColor }
 
   useLayoutEffect(() => {
     const el = containerRef.current
@@ -1018,6 +1053,68 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     ctx.restore()
   }, [imageToScreen])
 
+  const drawFillOverlays = useCallback((ctx: CanvasRenderingContext2D, shapes: FillShape[], draftPoints: Point[], activeIndex: number | null) => {
+    ctx.save()
+    for (let shapeIndex = 0; shapeIndex < shapes.length; shapeIndex++) {
+      const shape = shapes[shapeIndex]
+      const active = activeIndex === shapeIndex
+      ctx.beginPath()
+      shape.points.forEach((point, index) => {
+        const [sx, sy] = imageToScreen(point[0], point[1])
+        if (index === 0) ctx.moveTo(sx, sy)
+        else ctx.lineTo(sx, sy)
+      })
+      ctx.closePath()
+      ctx.fillStyle = active ? 'rgba(244, 211, 94, 0.24)' : 'rgba(244, 211, 94, 0.16)'
+      ctx.strokeStyle = active ? FILL_ACTIVE_COLOR : FILL_COLOR
+      ctx.lineWidth = active ? 2 : 1.5
+      ctx.fill()
+      ctx.stroke()
+      for (const point of shape.points) {
+        const [sx, sy] = imageToScreen(point[0], point[1])
+        ctx.beginPath()
+        ctx.arc(sx, sy, NODE_RADIUS - 1, 0, Math.PI * 2)
+        ctx.fillStyle = HALO_COLOR
+        ctx.fill()
+        ctx.beginPath()
+        ctx.arc(sx, sy, NODE_RADIUS - 3, 0, Math.PI * 2)
+        ctx.fillStyle = active ? FILL_ACTIVE_COLOR : FILL_COLOR
+        ctx.fill()
+      }
+    }
+
+    if (draftPoints.length > 0) {
+      ctx.setLineDash([5, 4])
+      ctx.beginPath()
+      draftPoints.forEach((point, index) => {
+        const [sx, sy] = imageToScreen(point[0], point[1])
+        if (index === 0) ctx.moveTo(sx, sy)
+        else ctx.lineTo(sx, sy)
+      })
+      ctx.strokeStyle = FILL_COLOR
+      ctx.lineWidth = 2
+      ctx.stroke()
+      ctx.setLineDash([])
+      draftPoints.forEach((point, index) => {
+        const [sx, sy] = imageToScreen(point[0], point[1])
+        ctx.beginPath()
+        ctx.arc(sx, sy, NODE_RADIUS + 2, 0, Math.PI * 2)
+        ctx.fillStyle = HALO_COLOR
+        ctx.fill()
+        ctx.beginPath()
+        ctx.arc(sx, sy, NODE_RADIUS, 0, Math.PI * 2)
+        ctx.fillStyle = FILL_COLOR
+        ctx.fill()
+        ctx.fillStyle = '#111'
+        ctx.font = '10px sans-serif'
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'middle'
+        ctx.fillText(String(index + 1), sx, sy)
+      })
+    }
+    ctx.restore()
+  }, [imageToScreen])
+
   const draw = useCallback(() => {
     drawScheduledRef.current = false
     const canvas = canvasRef.current
@@ -1048,6 +1145,9 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       tool: curTool,
       rectangles: currentRectangles,
       draft: currentDraft,
+      fillShapes: currentFillShapes,
+      fillDraft: currentFillDraft,
+      activeFillShapeIndex: currentActiveFillShapeIndex,
       activeRectangleIndex: currentActiveRectangleIndex,
       showMesh: meshVisible,
       meshDivisions: curMeshDivisions,
@@ -1076,6 +1176,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       drawPath(ctx, path, index, derived.outerIndex, currentActiveRectangleIndex, editingRectangle, 1)
     })
     drawDraft(ctx, currentDraft)
+    drawFillOverlays(ctx, currentFillShapes, currentFillDraft, currentActiveFillShapeIndex)
 
     const hover = hoverSegmentRef.current
     if (hover && currentActiveRectangleIndex === hover.rectangleIndex) {
@@ -1102,12 +1203,12 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       ctx.stroke()
       ctx.restore()
     }
-  }, [containerSize, drawDraft, drawPath, drawProjectedMesh, imageHeight, imageToScreen, imageWidth])
+  }, [containerSize, drawDraft, drawFillOverlays, drawPath, drawProjectedMesh, imageHeight, imageToScreen, imageWidth])
   drawRef.current = draw
 
   useEffect(() => {
     requestDraw()
-  }, [containerSize, imageReady, rectangles, draft, activeRectangleIndex, tool, hideGuides, showMesh, meshDivisions, meshColor, editDragKey, requestDraw])
+  }, [containerSize, imageReady, rectangles, draft, fillShapes, fillDraft, activeFillShapeIndex, activeRectangleIndex, tool, hideGuides, showMesh, meshDivisions, meshColor, editDragKey, requestDraw])
 
   const findSegmentHit = useCallback((rectangleIndex: number, screenPoint: Point): HoverSegment => {
     const path = pathForIndex(rectangleIndex)
@@ -1214,6 +1315,22 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     return null
   }, [findNodeHit])
 
+  const findFillPointHit = useCallback((screenPoint: Point): { shapeIndex: number; pointIndex: number } | null => {
+    const { activeFillShapeIndex: activeIndex, fillShapes: currentFillShapes } = propsRef.current
+    const indices = activeIndex === null
+      ? currentFillShapes.map((_, index) => index)
+      : [activeIndex, ...currentFillShapes.map((_, index) => index).filter((index) => index !== activeIndex)]
+    for (const shapeIndex of indices) {
+      const shape = currentFillShapes[shapeIndex]
+      for (let pointIndex = 0; pointIndex < shape.points.length; pointIndex++) {
+        const point = shape.points[pointIndex]
+        const screen = imageToScreen(point[0], point[1])
+        if (distance(screenPoint, screen) <= NODE_HIT_RADIUS) return { shapeIndex, pointIndex }
+      }
+    }
+    return null
+  }, [imageToScreen])
+
   const onPointerDown = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
       const canvas = canvasRef.current
@@ -1223,11 +1340,42 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
 
       if (e.button === 2) {
         e.preventDefault()
+        if (isFillTool(tool)) {
+          const draftHit = propsRef.current.fillDraft.findIndex((point) => {
+            const screen = imageToScreen(point[0], point[1])
+            return distance(screenPoint, screen) <= NODE_HIT_RADIUS
+          })
+          if (draftHit >= 0) {
+            onDeleteFillPoint(null, draftHit)
+            requestDraw()
+            return
+          }
+          const fillHit = findFillPointHit(screenPoint)
+          if (fillHit) {
+            onDeleteFillPoint(fillHit.shapeIndex, fillHit.pointIndex)
+            requestDraw()
+          }
+          return
+        }
         const deleteHit = findDeleteHit(screenPoint)
         if (deleteHit) {
           onDeleteNode(deleteHit.rectangleIndex, deleteHit.nodeIndex)
           requestDraw()
         }
+        return
+      }
+
+      if (isFillTool(tool)) {
+        const fillHit = findFillPointHit(screenPoint)
+        if (fillHit) {
+          onActivateFillShape(fillHit.shapeIndex)
+          dragRef.current = { kind: 'fill-point', shapeIndex: fillHit.shapeIndex, pointIndex: fillHit.pointIndex }
+          setEditDragKey(`fill:${fillHit.shapeIndex}:${fillHit.pointIndex}`)
+          canvas.setPointerCapture(e.pointerId)
+          return
+        }
+        onAppendFillPoint(clampPoint(screenToImage(screenPoint[0], screenPoint[1]), imageWidth, imageHeight))
+        requestDraw()
         return
       }
 
@@ -1239,7 +1387,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
         }
 
         const editHit = findEditHit(screenPoint)
-        if (editHit && editHit.kind !== 'pan') {
+        if (editHit && (editHit.kind === 'node' || editHit.kind === 'handle')) {
           onActivateRectangle(editHit.rectangleIndex)
           dragRef.current = editHit
           setEditDragKey(`${editHit.kind}:${editHit.rectangleIndex}:${editHit.nodeIndex}`)
@@ -1276,11 +1424,15 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     [
       findEditHit,
       findDeleteHit,
+      findFillPointHit,
       findSegmentHitAny,
       imageHeight,
       imageWidth,
       onActivateRectangle,
+      onActivateFillShape,
       onAppendCorner,
+      onAppendFillPoint,
+      onDeleteFillPoint,
       onDeleteNode,
       onInsertNode,
       pathForIndex,
@@ -1303,9 +1455,12 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
         const editHit = isRectangleTool(tool) && !drawingDraft ? findEditHit(screenPoint) : null
         const segmentHit = isRectangleTool(tool) && !drawingDraft && !editHit ? findSegmentHitAny(screenPoint) : null
         hoverSegmentRef.current = segmentHit
-        if (editHit?.kind === 'node' || editHit?.kind === 'handle') canvas.style.cursor = 'grab'
+        const fillHit = isFillTool(tool) ? findFillPointHit(screenPoint) : null
+        if (fillHit) canvas.style.cursor = 'grab'
+        else if (editHit?.kind === 'node' || editHit?.kind === 'handle') canvas.style.cursor = 'grab'
         else if (segmentHit) canvas.style.cursor = 'copy'
         else if (isRectangleTool(tool)) canvas.style.cursor = 'crosshair'
+        else if (isFillTool(tool)) canvas.style.cursor = 'crosshair'
         else canvas.style.cursor = tool === 'pan' ? 'grab' : 'default'
         requestDraw()
         return
@@ -1326,6 +1481,10 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
         onNodeChange(drag.rectangleIndex, drag.nodeIndex, imagePoint)
         return
       }
+      if (drag.kind === 'fill-point') {
+        onFillPointChange(drag.shapeIndex, drag.pointIndex, imagePoint)
+        return
+      }
       if (drag.kind === 'handle') {
         const path = pathForIndex(drag.rectangleIndex)
         const node = path?.nodes[drag.nodeIndex]
@@ -1338,10 +1497,12 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     },
     [
       findEditHit,
+      findFillPointHit,
       findSegmentHitAny,
       imageHeight,
       imageWidth,
       onHandleChange,
+      onFillPointChange,
       onNodeChange,
       pathForIndex,
       requestDraw,

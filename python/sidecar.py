@@ -16,7 +16,7 @@ from collections.abc import Callable
 
 import cv2
 
-from transform import export_corrected, export_dewarped
+from transform import export_corrected, export_dewarped, export_filled
 
 
 ProgressCallback = Callable[[float, str], None]
@@ -50,10 +50,22 @@ def _export_dewarped(params: dict, progress: ProgressCallback | None = None) -> 
     )
 
 
+def _export_filled(params: dict) -> dict:
+    return export_filled(
+        params["path"],
+        params["fill_shapes"],
+        params["output_path"],
+        int(params.get("quality", 92)),
+        params.get("model_path"),
+        params.get("sample_regions") or [],
+    )
+
+
 HANDLERS = {
     "image_meta": _image_meta,
     "export_corrected": _export_corrected,
     "export_dewarped": _export_dewarped,
+    "export_filled": _export_filled,
 }
 
 

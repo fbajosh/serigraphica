@@ -11,6 +11,10 @@ python/.venv/
 __pycache__/
 *.pyc
 
+# Local model weights
+models/*
+!models/.gitkeep
+
 # Output sidecar artifacts
 *.corrected.jpg
 *.serigraphica.json

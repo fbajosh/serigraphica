@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -25,6 +26,13 @@ def _emit_progress(progress: ProgressCallback | None, percent: float, stage: str
     if progress is None:
         return
     progress(max(0.0, min(100.0, percent)), stage)
+
+
+def _write_image(output_path: str, img: np.ndarray, quality: int) -> bool:
+    ext = Path(output_path).suffix.lower()
+    if ext == ".png":
+        return cv2.imwrite(output_path, img, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+    return cv2.imwrite(output_path, img, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
 
 
 def _order_corners(pts: np.ndarray) -> np.ndarray:
@@ -734,7 +742,7 @@ def export_corrected(
         borderMode=cv2.BORDER_REPLICATE,
     )
 
-    ok = cv2.imwrite(output_path, warped, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
+    ok = _write_image(output_path, warped, quality)
     if not ok:
         raise RuntimeError(f"failed to write output: {output_path}")
 
@@ -742,6 +750,207 @@ def export_corrected(
         "outputPath": output_path,
         "outputWidth": width,
         "outputHeight": height,
+    }
+
+
+def _fill_mask_from_shapes(shape: tuple[int, int], fill_shapes: list[dict]) -> np.ndarray:
+    h, w = shape
+    mask = np.zeros((h, w), dtype=np.uint8)
+    for fill_shape in fill_shapes:
+        points = fill_shape.get("points") or []
+        if len(points) < 3:
+            continue
+        pts = np.array([[float(point[0]), float(point[1])] for point in points], dtype=np.float32)
+        pts[:, 0] = np.clip(pts[:, 0], 0, w - 1)
+        pts[:, 1] = np.clip(pts[:, 1], 0, h - 1)
+        cv2.fillPoly(mask, [np.round(pts).astype(np.int32)], 255)
+    if np.any(mask):
+        kernel = np.ones((5, 5), dtype=np.uint8)
+        mask = cv2.dilate(mask, kernel, iterations=1)
+    return mask
+
+
+def _sample_mask_from_regions(shape: tuple[int, int], sample_regions: list[dict], fill_mask: np.ndarray) -> np.ndarray:
+    h, w = shape
+    sample_mask = np.zeros((h, w), dtype=np.uint8)
+    for region in sample_regions or []:
+        try:
+            x0 = int(np.floor(float(region["x0"])))
+            y0 = int(np.floor(float(region["y0"])))
+            x1 = int(np.ceil(float(region["x1"])))
+            y1 = int(np.ceil(float(region["y1"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+        x0 = max(0, min(w, x0))
+        x1 = max(0, min(w, x1))
+        y0 = max(0, min(h, y0))
+        y1 = max(0, min(h, y1))
+        if x1 <= x0 or y1 <= y0:
+            continue
+        sample_mask[y0:y1, x0:x1] = 255
+    sample_mask[fill_mask > 0] = 0
+    return sample_mask
+
+
+def _best_sample_patch(sample_img: np.ndarray, sample_mask: np.ndarray, bbox: tuple[int, int, int, int]) -> np.ndarray | None:
+    x, y, bw, bh = bbox
+    candidates = cv2.findNonZero(sample_mask)
+    if candidates is None or candidates.shape[0] < max(64, min(bw * bh, 2048)):
+        return None
+    sx, sy, sw, sh = cv2.boundingRect(candidates)
+    sample = sample_img[sy:sy + sh, sx:sx + sw]
+    valid = sample_mask[sy:sy + sh, sx:sx + sw]
+    if sample.size == 0 or np.count_nonzero(valid) < 64:
+        return None
+
+    if sw >= bw and sh >= bh:
+        px = sx + max(0, min(sw - bw, x - sx))
+        py = sy + max(0, min(sh - bh, y - sy))
+        patch = sample_img[py:py + bh, px:px + bw]
+        patch_valid = sample_mask[py:py + bh, px:px + bw]
+        if patch.shape[:2] == (bh, bw) and np.count_nonzero(patch_valid) >= bw * bh * 0.65:
+            return patch.copy()
+
+    rows = max(1, int(np.ceil(bh / sh)))
+    cols = max(1, int(np.ceil(bw / sw)))
+    tiled = np.tile(sample, (rows + 1, cols + 1, 1))
+    return tiled[:bh, :bw].copy()
+
+
+def _fill_with_sample_texture(img: np.ndarray, mask: np.ndarray, sample_regions: list[dict]) -> np.ndarray | None:
+    sample_mask = _sample_mask_from_regions(img.shape[:2], sample_regions, mask)
+    if np.count_nonzero(sample_mask) < 256:
+        return None
+
+    result = img.copy()
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), 8)
+    used = False
+    for label in range(1, component_count):
+        x, y, bw, bh, area = stats[label]
+        if area <= 0:
+            continue
+        patch = _best_sample_patch(result, sample_mask, (int(x), int(y), int(bw), int(bh)))
+        if patch is None:
+            continue
+        component = (labels[y:y + bh, x:x + bw] == label)
+        target = result[y:y + bh, x:x + bw]
+        target[component] = patch[component]
+        used = True
+
+    if not used:
+        return None
+
+    seam_kernel = np.ones((3, 3), dtype=np.uint8)
+    inner_edge = cv2.subtract(mask, cv2.erode(mask, seam_kernel, iterations=2))
+    if np.any(inner_edge):
+        result = cv2.inpaint(result, inner_edge, 2, cv2.INPAINT_TELEA)
+    return result
+
+
+def _lama_candidate_sizes(crop_shape: tuple[int, int]) -> list[int]:
+    h, w = crop_shape
+    longest = max(h, w)
+    dynamic_size = int(np.ceil(max(512, min(1024, longest)) / 32) * 32)
+    sizes = [dynamic_size, 512]
+    return list(dict.fromkeys(sizes))
+
+
+def _run_lama_crop(net: cv2.dnn.Net, img: np.ndarray, mask: np.ndarray, size: int) -> np.ndarray:
+    h, w = img.shape[:2]
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    interpolation = cv2.INTER_AREA if max(h, w) > size else cv2.INTER_CUBIC
+    resized_img = cv2.resize(rgb, (size, size), interpolation=interpolation).astype(np.float32) / 255.0
+    resized_mask = cv2.resize(mask, (size, size), interpolation=cv2.INTER_NEAREST).astype(np.float32) / 255.0
+    image_blob = np.transpose(resized_img, (2, 0, 1))[None, :, :, :]
+    mask_blob = resized_mask[None, None, :, :]
+    net.setInput(image_blob, "image")
+    net.setInput(mask_blob, "mask")
+    out = net.forward()
+    if out.ndim != 4 or out.shape[1] != 3:
+        raise RuntimeError("unexpected LaMa ONNX output")
+    out_img = np.transpose(out[0], (1, 2, 0))
+    out_img = np.clip(out_img, 0.0, 1.0)
+    out_img = (out_img * 255).astype(np.uint8)
+    out_img = cv2.resize(out_img, (w, h), interpolation=cv2.INTER_CUBIC)
+    return cv2.cvtColor(out_img, cv2.COLOR_RGB2BGR)
+
+
+def _inpaint_with_lama_onnx(img: np.ndarray, mask: np.ndarray, model_path: str) -> np.ndarray:
+    if not model_path or not Path(model_path).exists():
+        raise RuntimeError("LaMa ONNX model not found")
+
+    net = cv2.dnn.readNetFromONNX(model_path)
+    result = img.copy()
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), 8)
+    h, w = img.shape[:2]
+
+    for label in range(1, num_labels):
+        x, y, bw, bh, area = stats[label]
+        if area <= 0:
+            continue
+        pad = int(max(96, min(320, max(bw, bh) * 0.8)))
+        x0 = max(0, int(x) - pad)
+        y0 = max(0, int(y) - pad)
+        x1 = min(w, int(x + bw) + pad)
+        y1 = min(h, int(y + bh) + pad)
+        crop_img = result[y0:y1, x0:x1]
+        crop_mask = np.where(labels[y0:y1, x0:x1] == label, 255, 0).astype(np.uint8)
+        crop_out = None
+        last_error: Exception | None = None
+        for size in _lama_candidate_sizes(crop_img.shape[:2]):
+            try:
+                crop_out = _run_lama_crop(net, crop_img, crop_mask, size)
+                break
+            except Exception as err:
+                last_error = err
+        if crop_out is None:
+            raise RuntimeError(f"LaMa crop inference failed: {last_error}")
+        result_crop = result[y0:y1, x0:x1]
+        result[y0:y1, x0:x1] = np.where(crop_mask[:, :, None] > 0, crop_out, result_crop)
+
+    return result
+
+
+def export_filled(
+    image_path: str,
+    fill_shapes: list[dict],
+    output_path: str,
+    quality: int = 92,
+    model_path: str | None = None,
+    sample_regions: list[dict] | None = None,
+) -> dict:
+    img = cv2.imread(image_path, cv2.IMREAD_COLOR)
+    if img is None:
+        raise RuntimeError(f"failed to read image: {image_path}")
+    if not fill_shapes:
+        raise RuntimeError("at least one fill shape is required")
+
+    h, w = img.shape[:2]
+    mask = _fill_mask_from_shapes((h, w), fill_shapes)
+    if not np.any(mask):
+        raise RuntimeError("fill mask is empty")
+
+    method = "opencv-inpaint"
+    try:
+        result = _inpaint_with_lama_onnx(img, mask, model_path or "")
+        method = "lama-onnx-crop"
+    except Exception:
+        sampled = _fill_with_sample_texture(img, mask, sample_regions or [])
+        if sampled is not None:
+            result = sampled
+            method = "sample-texture"
+        else:
+            result = cv2.inpaint(img, mask, 5, cv2.INPAINT_TELEA)
+
+    ok = _write_image(output_path, result, quality)
+    if not ok:
+        raise RuntimeError(f"failed to write output: {output_path}")
+
+    return {
+        "outputPath": output_path,
+        "outputWidth": w,
+        "outputHeight": h,
+        "method": method,
     }
 
 
@@ -804,7 +1013,7 @@ def export_dewarped(
     )
 
     _emit_progress(progress, 96, "Writing image")
-    ok = cv2.imwrite(output_path, warped, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
+    ok = _write_image(output_path, warped, quality)
     if not ok:
         raise RuntimeError(f"failed to write output: {output_path}")
 

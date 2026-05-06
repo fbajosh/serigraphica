@@ -2,7 +2,7 @@ export type Point = [number, number]
 
 export type Quad = [Point, Point, Point, Point]
 
-export type Tool = 'pan' | 'pen-rectangle'
+export type Tool = 'pan' | 'pen-rectangle' | 'fill'
 
 export type BezierNode = {
   point: Point
@@ -17,6 +17,17 @@ export type RectPath = {
   // Ordered around the path: top-left, top-right, bottom-right, bottom-left.
   // Additional side nodes are inserted between these indices.
   cornerIndices: [number, number, number, number]
+}
+
+export type FillShape = {
+  points: Quad
+}
+
+export type FillSampleRegion = {
+  x0: number
+  y0: number
+  x1: number
+  y1: number
 }
 
 export type ExportResult = {
@@ -38,6 +49,7 @@ export type LoadedImage = {
   width: number
   height: number
   dataUrl: string
+  method?: string
 }
 
 export type SerigraphicaAPI = {
@@ -62,17 +74,30 @@ export type SerigraphicaAPI = {
   exportDewarped: (
     imagePath: string,
     rectangles: RectPath[],
-    quality: number
+    quality: number,
+    outputBasePath?: string,
+    fillShapes?: FillShape[],
+    fillSampleRegions?: FillSampleRegion[]
   ) => Promise<ExportResult>
   exportDewarpedAs: (
     imagePath: string,
     rectangles: RectPath[],
-    quality: number
+    quality: number,
+    outputBasePath?: string,
+    fillShapes?: FillShape[],
+    fillSampleRegions?: FillSampleRegion[]
   ) => Promise<ExportResult | null>
   previewDewarped: (
     imagePath: string,
     rectangles: RectPath[],
-    quality: number
+    quality: number,
+    outputBasePath?: string
+  ) => Promise<LoadedImage>
+  previewFilled: (
+    imagePath: string,
+    fillShapes: FillShape[],
+    quality: number,
+    fillSampleRegions?: FillSampleRegion[]
   ) => Promise<LoadedImage>
   cancelDewarp: () => Promise<boolean>
   onDewarpProgress: (callback: (progress: DewarpProgress) => void) => () => void
