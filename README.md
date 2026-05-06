@@ -10,7 +10,7 @@ The current implementation is intentionally local-first:
 - Outputs: generated previews and exports are written under `output/`.
 
 ## Demo video
-https://github.com/user-attachments/assets/e65f503d-1519-4ee5-bcfc-f6ed6fad0387
+https://github.com/user-attachments/assets/d5f239b3-be7e-4145-97ec-faaa0ce4c58f
 
 ## Workflow
 
