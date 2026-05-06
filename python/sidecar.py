@@ -16,6 +16,7 @@ from collections.abc import Callable
 
 import cv2
 
+from detect_guides import detect_guides
 from transform import export_corrected, export_dewarped, export_filled
 
 
@@ -29,6 +30,10 @@ def _image_meta(params: dict) -> dict:
         raise RuntimeError(f"failed to read image: {path}")
     h, w = img.shape[:2]
     return {"width": int(w), "height": int(h)}
+
+
+def _detect_guides(params: dict) -> dict:
+    return detect_guides(params["path"])
 
 
 def _export_corrected(params: dict) -> dict:
@@ -64,6 +69,7 @@ def _export_filled(params: dict) -> dict:
 
 HANDLERS = {
     "image_meta": _image_meta,
+    "detect_guides": _detect_guides,
     "export_corrected": _export_corrected,
     "export_dewarped": _export_dewarped,
     "export_filled": _export_filled,

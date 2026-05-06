@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react'
 import { buildFillSampleRegions, Canvas, CanvasHandle } from './components/Canvas'
-import type { BezierNode, DewarpProgress, FillShape, Point, Quad, RectPath, Tool } from '../shared/types'
+import type { BezierNode, DetectGuidesResult, DewarpProgress, FillShape, Point, Quad, RectPath, Tool } from '../shared/types'
 
 type Loaded = {
   path: string
@@ -164,6 +164,24 @@ function deriveRectangles(rectangles: RectPath[]) {
   }
 }
 
+function mergeDetectedRectangles(current: RectPath[], detected: RectPath[]): RectPath[] {
+  if (detected.length === 0) return current
+  if (current.length === 0) return detected
+  const sortedCurrent = current
+    .map((path, index) => ({ path, index, area: pathArea(path) }))
+    .sort((a, b) => b.area - a.area)
+  const next = [...current]
+  const outer = sortedCurrent[0]
+  if (outer) next[outer.index] = detected[0]
+  else next.push(detected[0])
+  if (detected[1]) {
+    const firstInner = sortedCurrent[1]
+    if (firstInner) next[firstInner.index] = detected[1]
+    else next.push(detected[1])
+  }
+  return next
+}
+
 function rectangleColor(index: number, outerIndex: number | null): string {
   if (index === outerIndex) return RECTANGLE_COLORS[0]
   return RECTANGLE_COLORS[(index % (RECTANGLE_COLORS.length - 1)) + 1]
@@ -244,7 +262,29 @@ export function App() {
     setSavedDebugOutline(getSavedDebugOutlineMeta(targetFilename))
   }, [])
 
-  const applyLoadedImage = useCallback((res: Loaded) => {
+  const applyDetectedGuides = useCallback((result: DetectGuidesResult, baseRectangles: RectPath[]) => {
+    const detected = Array.isArray(result.rectangles) ? result.rectangles : []
+    if (detected.length === 0) return false
+    const nextRectangles = mergeDetectedRectangles(baseRectangles, detected)
+    const nextRoles = deriveRectangles(nextRectangles)
+    setRectangles(nextRectangles)
+    setActiveRectangleIndex(nextRoles.outerIndex ?? 0)
+    setDraft([])
+    setFillShapes([])
+    setFillDraft([])
+    setActiveFillShapeIndex(null)
+    setFilledImage(null)
+    setFillDirty(false)
+    setDewarpPreview(null)
+    setDewarpProgress(null)
+    setShowMesh(true)
+    setTool('pen-rectangle')
+    const confidence = Math.round(Math.max(0, Math.min(1, result.confidence || 0)) * 100)
+    setStatus(`Detected ${detected.length} guide${detected.length === 1 ? '' : 's'} (${confidence}% edge confidence)`)
+    return true
+  }, [])
+
+  const applyLoadedImage = useCallback(async (res: Loaded) => {
     const targetFilename = imageFilename(res.path)
     const saved = getSavedDebugOutline(targetFilename)
     const savedRectangles = saved?.rectangles ?? []
@@ -266,10 +306,24 @@ export function App() {
       : ''
     setDebugMessage(saved ? `Loaded saved paths for ${targetFilename}.${sizeWarning}` : '')
     refreshSavedDebugOutline(targetFilename)
-    setStatus(saved
-      ? `Loaded saved paths for ${targetFilename}.${sizeWarning}`
-      : 'Draw: click four corners around the next rectangle')
-  }, [refreshSavedDebugOutline])
+    if (saved) {
+      setStatus(`Loaded saved paths for ${targetFilename}.${sizeWarning}`)
+      return
+    }
+    setStatus('Detecting starter guides...')
+    try {
+      const result = await window.serigraphica.detectGuides(res.path)
+      if (applyDetectedGuides(result, [])) {
+        setDebugMessage(`Auto-detected starter guides for ${targetFilename}`)
+      } else {
+        setDebugMessage('')
+        setStatus('No guide edges detected. Draw: click four corners around the next rectangle')
+      }
+    } catch (err) {
+      setDebugMessage('')
+      setStatus(`Detection failed: ${(err as Error).message}. Draw manually.`)
+    }
+  }, [applyDetectedGuides, refreshSavedDebugOutline])
 
   const handleOpen = useCallback(async () => {
     setBusy(true)
@@ -280,7 +334,7 @@ export function App() {
         setStatus('Ready')
         return
       }
-      applyLoadedImage(res)
+      await applyLoadedImage(res)
     } catch (err) {
       setStatus(`Error: ${(err as Error).message}`)
     } finally {
@@ -308,7 +362,7 @@ export function App() {
     setStatus('Opening dropped image...')
     try {
       const res = await window.serigraphica.openImagePath(imagePath)
-      applyLoadedImage(res)
+      await applyLoadedImage(res)
     } catch (err) {
       setStatus(`Error: ${(err as Error).message}`)
     } finally {
@@ -363,8 +417,26 @@ export function App() {
     clearDewarpOutputs()
     setShowMesh(false)
     setTool('pen-rectangle')
-    setStatus('Reset all rectangles')
+    setStatus('Cleared lines')
   }, [clearDewarpOutputs])
+
+  const handleDetectGuides = useCallback(async () => {
+    if (!image) return
+    setBusy(true)
+    setStatus(rectangles.length ? 'Redetecting starter guides...' : 'Detecting starter guides...')
+    try {
+      const result = await window.serigraphica.detectGuides(image.path)
+      if (!applyDetectedGuides(result, rectangles)) {
+        setStatus('No guide edges detected. Draw manually.')
+      } else {
+        setDebugMessage(`Auto-detected starter guides for ${imageFilename(image.path)}`)
+      }
+    } catch (err) {
+      setStatus(`Detection failed: ${(err as Error).message}`)
+    } finally {
+      setBusy(false)
+    }
+  }, [applyDetectedGuides, image, rectangles])
 
   const handleAppendCorner = useCallback((point: Point) => {
     const next = [...draft, point]
@@ -808,6 +880,9 @@ export function App() {
             <ToolButton active={tool === 'pan'} onClick={handlePanMode} disabled={!image} title="Pan/move">
               Pan
             </ToolButton>
+            <button onClick={handleDetectGuides} disabled={!image || busy} title="Detect starter guides">
+              Detect
+            </button>
           </div>
           <div className="rectangle-list-box">
             {rectangles.length === 0 && !draft.length && (
@@ -829,7 +904,7 @@ export function App() {
             )}
           </div>
           <div className="path-actions guide-line-actions">
-            <button onClick={handleResetAll} disabled={!hasAnyPath}>Reset Lines</button>
+            <button onClick={handleResetAll} disabled={!hasAnyPath}>Clear Lines</button>
             <button onClick={handleSaveDebugOutlines} disabled={!image || rectangles.length === 0}>Save Lines</button>
           </div>
           <div className="path-actions guide-display-actions">

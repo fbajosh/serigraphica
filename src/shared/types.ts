@@ -52,10 +52,20 @@ export type LoadedImage = {
   method?: string
 }
 
+export type DetectGuidesResult = {
+  rectangles: RectPath[]
+  imageWidth: number
+  imageHeight: number
+  confidence: number
+  candidates: number
+  method: string
+}
+
 export type SerigraphicaAPI = {
   openImage: () => Promise<LoadedImage | null>
   openImagePath: (imagePath: string) => Promise<LoadedImage>
   filePathForDrop: (file: File) => string
+  detectGuides: (imagePath: string) => Promise<DetectGuidesResult>
   exportCorrected: (
     imagePath: string,
     corners: Quad,

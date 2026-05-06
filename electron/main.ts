@@ -254,6 +254,10 @@ ipcMain.handle('open-image-path', async (_evt, imagePath: string) => {
   return loadImage(imagePath)
 })
 
+ipcMain.handle('detect-guides', async (_evt, imagePath: string) => {
+  return sidecar.call('detect_guides', { path: imagePath })
+})
+
 ipcMain.handle('export-corrected', async (_evt, imagePath: string, corners: number[][], quality: number) => {
   return exportCorrectedTo(imagePath, corners, quality, correctedOutputPath(imagePath))
 })

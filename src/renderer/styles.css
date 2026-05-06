@@ -226,7 +226,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 
 .guide-tool-actions {
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   margin-top: 0;
   margin-bottom: 10px;
 }
