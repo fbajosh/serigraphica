@@ -953,7 +953,7 @@ export function App() {
   const fillActionEnabled = !busy && ((filledImage && !fillDirty) || (dewarpActive && fillShapes.length > 0))
   const dewarpButtonLabel = dewarpProgress
     ? `Dewarping...${Math.round(Math.max(0, Math.min(100, dewarpProgress.percent)))}%`
-    : 'Dewarp'
+    : dewarpActive ? 'Back to Mesh' : 'Dewarp'
   const dewarpButtonClass = dewarpProgress ? 'dewarp-button dewarp-button--busy' : 'dewarp-button'
 
   return (
