@@ -9,6 +9,9 @@ The current implementation is intentionally local-first:
 - Image processing: Python sidecar using OpenCV/NumPy in `python`.
 - Outputs: generated previews and exports are written under `output/`.
 
+## Demo video
+https://github.com/user-attachments/assets/e65f503d-1519-4ee5-bcfc-f6ed6fad0387
+
 ## Workflow
 
 1. Open or drag an image into the app.
