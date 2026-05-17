@@ -21,6 +21,8 @@ type SavedManualOutline = {
   imageWidth: number
   imageHeight: number
   rectangles: RectPath[]
+  meshDivisions?: number
+  meshCurve?: number
 }
 
 type LegacySavedManualOutline = {
@@ -38,6 +40,8 @@ type SavedManualOutlineMeta = {
   imageWidth: number
   imageHeight: number
   rectangleNodes: number[]
+  meshDivisions?: number
+  meshCurve?: number
 }
 
 function imageFilename(path: string): string {
@@ -85,8 +89,18 @@ function getSavedDebugOutlineMeta(filename: string): SavedManualOutlineMeta | nu
     savedAt: saved.savedAt,
     imageWidth: saved.imageWidth,
     imageHeight: saved.imageHeight,
-    rectangleNodes: saved.rectangles.map((path) => path.nodes.length)
+    rectangleNodes: saved.rectangles.map((path) => path.nodes.length),
+    meshDivisions: saved.meshDivisions,
+    meshCurve: saved.meshCurve
   }
+}
+
+function isValidMeshDivisions(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 4 && value <= 24
+}
+
+function isValidMeshCurve(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100
 }
 
 function pathFromCorners(corners: Point[]): RectPath {
@@ -453,6 +467,8 @@ export function App() {
     setShowMesh(savedRectangles.length > 0)
     setZoomLevel(1)
     setDewarpPreview(null)
+    if (saved && isValidMeshDivisions(saved.meshDivisions)) setMeshDivisions(saved.meshDivisions)
+    if (saved && isValidMeshCurve(saved.meshCurve)) setMeshCurve(saved.meshCurve)
     const sizeWarning = saved && (saved.imageWidth !== res.width || saved.imageHeight !== res.height)
       ? ' Dimensions differ from the open image.'
       : ''
@@ -812,8 +828,8 @@ export function App() {
       setStatus('Returned to original image')
       return
     }
-    if (rectangles.length < 2) {
-      setStatus('Create at least two rectangles for mesh dewarp')
+    if (rectangles.length < 1) {
+      setStatus('Create at least one rectangle for dewarp')
       return
     }
     setBusy(true)
@@ -870,18 +886,20 @@ export function App() {
         savedAt: new Date().toISOString(),
         imageWidth: image.width,
         imageHeight: image.height,
-        rectangles
+        rectangles,
+        meshDivisions,
+        meshCurve
       }
       writeDebugOutlineStore(store)
       refreshSavedDebugOutline(targetFilename)
-      setDebugMessage(`Saved manual paths for ${targetFilename}`)
-      setStatus(`Saved manual paths for ${targetFilename}`)
+      setDebugMessage(`Saved lines and grid settings for ${targetFilename}`)
+      setStatus(`Saved lines and grid settings for ${targetFilename}`)
     } catch (err) {
       const message = `Save failed: ${(err as Error).message}`
       setDebugMessage(message)
       setStatus(message)
     }
-  }, [image, rectangles, refreshSavedDebugOutline])
+  }, [image, meshCurve, meshDivisions, rectangles, refreshSavedDebugOutline])
 
   useEffect(() => {
     if (!image) {
@@ -951,6 +969,7 @@ export function App() {
   const fillOverlayVisible = dewarpActive && !activeFilledImage
   const fillButtonLabel = filledImage ? (fillDirty ? 'Refill' : 'Unfill') : 'Fill'
   const fillActionEnabled = !busy && ((filledImage && !fillDirty) || (dewarpActive && fillShapes.length > 0))
+  const saveLinesLabel = savedDebugOutline ? 'Resave Lines' : 'Save Lines'
   const dewarpButtonLabel = dewarpProgress
     ? `Dewarping...${Math.round(Math.max(0, Math.min(100, dewarpProgress.percent)))}%`
     : dewarpActive ? 'Back to Mesh' : 'Dewarp'
@@ -1068,7 +1087,7 @@ export function App() {
           </div>
           <div className="path-actions guide-line-actions">
             <button onClick={handleResetAll} disabled={!hasAnyPath}>Clear Lines</button>
-            <button onClick={handleSaveDebugOutlines} disabled={!image || rectangles.length === 0}>Save Lines</button>
+            <button onClick={handleSaveDebugOutlines} disabled={!image || rectangles.length === 0}>{saveLinesLabel}</button>
           </div>
           <div className="path-actions guide-display-actions">
             <ToolButton active={showMesh} onClick={handleProjectMesh} title="Project mesh using both rectangles">
@@ -1105,7 +1124,7 @@ export function App() {
             onChange={(e) => handleMeshCurveChange(Number(e.target.value))}
             style={{ width: '100%' }}
           />
-          <ToolButton active={dewarpActive} onClick={handleDewarp} disabled={!image || rectangles.length < 2 || (busy && !dewarpProgress)} title="Toggle dewarp preview" className={`${dewarpButtonClass} mesh-dewarp-button`}>
+          <ToolButton active={dewarpActive} onClick={handleDewarp} disabled={!image || rectangles.length < 1 || (busy && !dewarpProgress)} title="Toggle dewarp preview" className={`${dewarpButtonClass} mesh-dewarp-button`}>
             {dewarpButtonLabel}
           </ToolButton>
         </section>

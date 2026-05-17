@@ -21,6 +21,8 @@ Point = tuple[float, float]
 ProgressCallback = Callable[[float, str], None]
 BOUNDARY_SAMPLE_COUNT = 513
 FILL_FEATHER_RADIUS = 18
+LAB_FIELD_MIN_PIXELS = 24
+LAB_FIELD_MAX_SAMPLES = 12000
 
 
 def _emit_progress(progress: ProgressCallback | None, percent: float, stage: str) -> None:
@@ -431,7 +433,7 @@ def _build_nested_mesh_layout(outer_path: dict, inner_paths: list[dict]) -> dict
     min_gap = max(8.0, min(width, height) * 0.025)
     rects = [{"path": outer, "x0": 0.0, "y0": 0.0, "x1": width, "y1": height}]
 
-    for path in sorted(inner_paths, key=_path_area, reverse=True):
+    for inner_index, path in enumerate(sorted(inner_paths, key=_path_area, reverse=True)):
         canonical = _canonicalize_path(path, outer)
         measured_width = max(1.0, (_boundary_length(canonical["boundaries"]["top"]) + _boundary_length(canonical["boundaries"]["bottom"])) / 2)
         measured_height = max(1.0, (_boundary_length(canonical["boundaries"]["left"]) + _boundary_length(canonical["boundaries"]["right"])) / 2)
@@ -444,8 +446,12 @@ def _build_nested_mesh_layout(outer_path: dict, inner_paths: list[dict]) -> dict
         scale = min(1.0, max_width / measured_width, max_height / measured_height)
         target_width = measured_width * scale
         target_height = measured_height * scale
-        x0 = max(parent["x0"] + min_gap, min(parent["x1"] - min_gap - target_width, cx - target_width / 2))
-        y0 = max(parent["y0"] + min_gap, min(parent["y1"] - min_gap - target_height, cy - target_height / 2))
+        # The largest inner rectangle usually shares the paper center with the outer.
+        # Smaller nested guides keep their observed placement.
+        target_cx = (parent["x0"] + parent["x1"]) / 2 if inner_index == 0 else cx
+        target_cy = (parent["y0"] + parent["y1"]) / 2 if inner_index == 0 else cy
+        x0 = max(parent["x0"] + min_gap, min(parent["x1"] - min_gap - target_width, target_cx - target_width / 2))
+        y0 = max(parent["y0"] + min_gap, min(parent["y1"] - min_gap - target_height, target_cy - target_height / 2))
         rects.append({"path": canonical, "x0": x0, "y0": y0, "x1": x0 + target_width, "y1": y0 + target_height})
 
     patches = []
@@ -595,7 +601,7 @@ def _mesh_layout(outer_path: dict, inner_paths: list[dict]) -> dict:
     height = max(1.0, (_boundary_length(outer["left"]) + _boundary_length(outer["right"])) / 2)
     min_gap = max(8.0, min(width, height) * 0.025)
     inner_rects = []
-    for path in inner_paths:
+    for inner_index, path in enumerate(sorted(inner_paths, key=_path_area, reverse=True)):
         boundaries = _boundaries(path)
         measured_width = max(1.0, (_boundary_length(boundaries["top"]) + _boundary_length(boundaries["bottom"])) / 2)
         measured_height = max(1.0, (_boundary_length(boundaries["left"]) + _boundary_length(boundaries["right"])) / 2)
@@ -608,8 +614,11 @@ def _mesh_layout(outer_path: dict, inner_paths: list[dict]) -> dict:
         inner_height = min(height - min_gap * 2, max(min_gap, abs(bottom_v - top_v) * height, measured_height * 0.35))
         cx = width * ((left_u + right_u) / 2)
         cy = height * ((top_v + bottom_v) / 2)
-        x0 = max(min_gap, min(width - min_gap - inner_width, cx - inner_width / 2))
-        y0 = max(min_gap, min(height - min_gap - inner_height, cy - inner_height / 2))
+        # Keep this legacy TPS layout consistent with the nested mesh layout.
+        target_cx = width / 2 if inner_index == 0 else cx
+        target_cy = height / 2 if inner_index == 0 else cy
+        x0 = max(min_gap, min(width - min_gap - inner_width, target_cx - inner_width / 2))
+        y0 = max(min_gap, min(height - min_gap - inner_height, target_cy - inner_height / 2))
         inner_rects.append({
             "path": path,
             "x0": x0,
@@ -856,6 +865,71 @@ def _sample_mask_from_regions(shape: tuple[int, int], sample_regions: list[dict]
     return sample_mask
 
 
+def _window_sum(integral: np.ndarray, x: int, y: int, w: int, h: int) -> int:
+    return int(integral[y + h, x + w] - integral[y, x + w] - integral[y + h, x] + integral[y, x])
+
+
+def _clean_invalid_sample_pixels(sample: np.ndarray, valid: np.ndarray) -> np.ndarray | None:
+    valid_mask = valid > 0
+    if np.count_nonzero(valid_mask) < 64:
+        return None
+    if np.all(valid_mask):
+        return sample.copy()
+    invalid = np.where(valid_mask, 0, 255).astype(np.uint8)
+    return cv2.inpaint(sample, invalid, 5, cv2.INPAINT_TELEA)
+
+
+def _best_valid_sample_window(
+    valid: np.ndarray,
+    target_x: int,
+    target_y: int,
+    bw: int,
+    bh: int,
+) -> tuple[int, int, int] | None:
+    h, w = valid.shape[:2]
+    if w < bw or h < bh:
+        return None
+    valid_binary = (valid > 0).astype(np.uint8)
+    integral = cv2.integral(valid_binary)
+    area = bw * bh
+    max_x = w - bw
+    max_y = h - bh
+    preferred_x = max(0, min(max_x, target_x))
+    preferred_y = max(0, min(max_y, target_y))
+    best: tuple[float, int, int, int] | None = None
+
+    def consider(x: int, y: int) -> bool:
+        nonlocal best
+        x = max(0, min(max_x, int(x)))
+        y = max(0, min(max_y, int(y)))
+        count = _window_sum(integral, x, y, bw, bh)
+        distance_penalty = 0.001 * (abs(x - preferred_x) + abs(y - preferred_y))
+        score = count - distance_penalty
+        if best is None or score > best[0]:
+            best = (score, x, y, count)
+        return count == area
+
+    if consider(preferred_x, preferred_y):
+        return preferred_x, preferred_y, area
+
+    step = max(1, min(48, max(8, min(bw, bh) // 3)))
+    xs = list(range(0, max_x + 1, step))
+    ys = list(range(0, max_y + 1, step))
+    if xs[-1] != max_x:
+        xs.append(max_x)
+    if ys[-1] != max_y:
+        ys.append(max_y)
+    for y in ys:
+        for x in xs:
+            if consider(x, y):
+                return x, y, area
+
+    if best is None:
+        return None
+    _, x, y, count = best
+    return x, y, count
+
+
 def _best_sample_patch(sample_img: np.ndarray, sample_mask: np.ndarray, bbox: tuple[int, int, int, int]) -> np.ndarray | None:
     x, y, bw, bh = bbox
     candidates = cv2.findNonZero(sample_mask)
@@ -868,16 +942,24 @@ def _best_sample_patch(sample_img: np.ndarray, sample_mask: np.ndarray, bbox: tu
         return None
 
     if sw >= bw and sh >= bh:
-        px = sx + max(0, min(sw - bw, x - sx))
-        py = sy + max(0, min(sh - bh, y - sy))
-        patch = sample_img[py:py + bh, px:px + bw]
-        patch_valid = sample_mask[py:py + bh, px:px + bw]
-        if patch.shape[:2] == (bh, bw) and np.count_nonzero(patch_valid) >= bw * bh * 0.65:
-            return patch.copy()
+        window = _best_valid_sample_window(valid, x - sx, y - sy, bw, bh)
+        if window is not None:
+            px_local, py_local, valid_count = window
+            if valid_count >= bw * bh * 0.9:
+                px = sx + px_local
+                py = sy + py_local
+                patch = sample_img[py:py + bh, px:px + bw]
+                patch_valid = sample_mask[py:py + bh, px:px + bw]
+                cleaned = _clean_invalid_sample_pixels(patch, patch_valid)
+                if cleaned is not None:
+                    return cleaned
 
+    cleaned_sample = _clean_invalid_sample_pixels(sample, valid)
+    if cleaned_sample is None:
+        return None
     rows = max(1, int(np.ceil(bh / sh)))
     cols = max(1, int(np.ceil(bw / sw)))
-    tiled = np.tile(sample, (rows + 1, cols + 1, 1))
+    tiled = np.tile(cleaned_sample, (rows + 1, cols + 1, 1))
     return tiled[:bh, :bw].copy()
 
 
@@ -910,6 +992,50 @@ def _lab_pixels(img: np.ndarray, selector: np.ndarray) -> np.ndarray | None:
     return cv2.cvtColor(pixels.reshape(-1, 1, 3), cv2.COLOR_BGR2LAB).reshape(-1, 3).astype(np.float32)
 
 
+def _fit_lab_plane(
+    lab_img: np.ndarray,
+    selector: np.ndarray,
+    origin_x: int,
+    origin_y: int,
+    width: int,
+    height: int,
+    global_offset: tuple[int, int],
+) -> np.ndarray | None:
+    ys, xs = np.where(selector)
+    if xs.shape[0] < LAB_FIELD_MIN_PIXELS:
+        return None
+    if xs.shape[0] > LAB_FIELD_MAX_SAMPLES:
+        step = int(np.ceil(xs.shape[0] / LAB_FIELD_MAX_SAMPLES))
+        xs = xs[::step]
+        ys = ys[::step]
+    gx = xs.astype(np.float32) + float(global_offset[0])
+    gy = ys.astype(np.float32) + float(global_offset[1])
+    nx = (gx - float(origin_x)) / max(float(width), 1.0)
+    ny = (gy - float(origin_y)) / max(float(height), 1.0)
+    design = np.column_stack((np.ones_like(nx), nx, ny)).astype(np.float32)
+    values = lab_img[ys, xs].astype(np.float32)
+    try:
+        coeff, *_ = np.linalg.lstsq(design, values, rcond=None)
+    except np.linalg.LinAlgError:
+        return None
+    return coeff.astype(np.float32)
+
+
+def _eval_lab_plane(coeff: np.ndarray, shape: tuple[int, int], origin_x: int, origin_y: int, global_offset: tuple[int, int]) -> np.ndarray:
+    h, w = shape
+    yy, xx = np.indices((h, w), dtype=np.float32)
+    nx = (xx + float(global_offset[0]) - float(origin_x)) / max(float(w), 1.0)
+    ny = (yy + float(global_offset[1]) - float(origin_y)) / max(float(h), 1.0)
+    return coeff[0][None, None, :] + coeff[1][None, None, :] * nx[:, :, None] + coeff[2][None, None, :] * ny[:, :, None]
+
+
+def _clamp_lab_field(field: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
+    # The plane should carry paper lighting/color gradients, not wild outliers
+    # from shadows or ink at the edge of the sampled ring.
+    allowance = np.maximum(std * np.array([2.8, 2.2, 2.2], dtype=np.float32), np.array([18.0, 8.0, 8.0], dtype=np.float32))
+    return np.clip(field, mean[None, None, :] - allowance[None, None, :], mean[None, None, :] + allowance[None, None, :])
+
+
 def _match_patch_to_local_paper(
     img: np.ndarray,
     patch: np.ndarray,
@@ -925,8 +1051,10 @@ def _match_patch_to_local_paper(
 
     ring_mask, (x0, y0) = ring_info
     ring_img = img[y0:y0 + ring_mask.shape[0], x0:x0 + ring_mask.shape[1]]
-    target_lab = _lab_pixels(ring_img, ring_mask > 0)
-    source_lab = _lab_pixels(patch, component)
+    ring_selector = ring_mask > 0
+    component_selector = component > 0
+    target_lab = _lab_pixels(ring_img, ring_selector)
+    source_lab = _lab_pixels(patch, component_selector)
     if target_lab is None or source_lab is None:
         return patch
 
@@ -934,10 +1062,28 @@ def _match_patch_to_local_paper(
     target_mean = target_lab.mean(axis=0)
     source_std = source_lab.std(axis=0)
     target_std = target_lab.std(axis=0)
-    std_ratio = np.clip(target_std / np.maximum(source_std, 1.0), 0.82, 1.18)
+    std_ratio = np.clip(
+        target_std / np.maximum(source_std, 1.0),
+        np.array([0.58, 0.68, 0.68], dtype=np.float32),
+        np.array([1.55, 1.35, 1.35], dtype=np.float32),
+    )
 
     patch_lab = cv2.cvtColor(patch, cv2.COLOR_BGR2LAB).astype(np.float32)
-    adjusted_lab = (patch_lab - source_mean[None, None, :]) * std_ratio[None, None, :] + target_mean[None, None, :]
+    bbox_x, bbox_y, bbox_w, bbox_h = bbox
+    ring_lab_img = cv2.cvtColor(ring_img, cv2.COLOR_BGR2LAB).astype(np.float32)
+    source_coeff = _fit_lab_plane(patch_lab, component_selector, bbox_x, bbox_y, bbox_w, bbox_h, (bbox_x, bbox_y))
+    target_coeff = _fit_lab_plane(ring_lab_img, ring_selector, bbox_x, bbox_y, bbox_w, bbox_h, (x0, y0))
+
+    if source_coeff is not None and target_coeff is not None:
+        source_field = _eval_lab_plane(source_coeff, patch_lab.shape[:2], bbox_x, bbox_y, (bbox_x, bbox_y))
+        target_field = _eval_lab_plane(target_coeff, patch_lab.shape[:2], bbox_x, bbox_y, (bbox_x, bbox_y))
+        source_field = _clamp_lab_field(source_field, source_mean, source_std)
+        target_field = _clamp_lab_field(target_field, target_mean, target_std)
+    else:
+        source_field = source_mean[None, None, :]
+        target_field = target_mean[None, None, :]
+
+    adjusted_lab = (patch_lab - source_field) * std_ratio[None, None, :] + target_field
     adjusted_lab = np.clip(adjusted_lab, 0, 255).astype(np.uint8)
     return cv2.cvtColor(adjusted_lab, cv2.COLOR_LAB2BGR)
 

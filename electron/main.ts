@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, protocol, net } from 'electron'
 import type { IpcMainInvokeEvent } from 'electron'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join, basename, extname } from 'node:path'
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs'
 import { spawn, ChildProcessWithoutNullStreams } from 'node:child_process'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -189,6 +189,20 @@ function fillPreviewOutputPath(imagePath: string) {
   return join(outputDir, `.${base}_filled_preview.png`)
 }
 
+function cleanupTemporaryPreviewFiles() {
+  if (!existsSync(outputDir)) return
+  for (const name of readdirSync(outputDir)) {
+    const isTemporaryPreview = name.startsWith('.') &&
+      (name.endsWith('_preview.jpg') || name.endsWith('_filled_preview.png'))
+    if (!isTemporaryPreview) continue
+    try {
+      unlinkSync(join(outputDir, name))
+    } catch (err) {
+      console.warn(`[main] failed to remove temporary preview ${name}:`, err)
+    }
+  }
+}
+
 async function exportCorrectedTo(imagePath: string, corners: number[][], quality: number, outputPath: string) {
   return sidecar.call('export_corrected', {
     path: imagePath,
@@ -247,10 +261,12 @@ ipcMain.handle('open-image', async () => {
     filters: [{ name: 'Images', extensions: ['jpg', 'jpeg', 'png'] }]
   })
   if (result.canceled || result.filePaths.length === 0) return null
+  cleanupTemporaryPreviewFiles()
   return loadImage(result.filePaths[0])
 })
 
 ipcMain.handle('open-image-path', async (_evt, imagePath: string) => {
+  cleanupTemporaryPreviewFiles()
   return loadImage(imagePath)
 })
 
@@ -345,6 +361,7 @@ ipcMain.handle('cancel-dewarp', async () => {
 
 app.whenReady().then(() => {
   registerLocalImageProtocol()
+  cleanupTemporaryPreviewFiles()
   sidecar.start()
   createWindow()
 
@@ -354,10 +371,12 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
+  cleanupTemporaryPreviewFiles()
   sidecar.stop()
   if (process.platform !== 'darwin') app.quit()
 })
 
 app.on('before-quit', () => {
+  cleanupTemporaryPreviewFiles()
   sidecar.stop()
 })

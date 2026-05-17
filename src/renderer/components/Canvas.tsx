@@ -508,7 +508,7 @@ function buildNestedMeshLayout(outerPath: RectPath, innerPaths: RectPath[]): Mes
   const outerRect: TargetRect = { path: outer, x0: 0, y0: 0, x1: width, y1: height }
   const rects: TargetRect[] = [outerRect]
 
-  for (const path of sortedInnerPaths) {
+  for (const [innerIndex, path] of sortedInnerPaths.entries()) {
     const canonical = canonicalizePath(path, outer)
     const measuredWidth = Math.max(1, (boundaryLength(canonical.boundaries.top) + boundaryLength(canonical.boundaries.bottom)) / 2)
     const measuredHeight = Math.max(1, (boundaryLength(canonical.boundaries.left) + boundaryLength(canonical.boundaries.right)) / 2)
@@ -521,8 +521,12 @@ function buildNestedMeshLayout(outerPath: RectPath, innerPaths: RectPath[]): Mes
     const scale = Math.min(1, maxWidth / measuredWidth, maxHeight / measuredHeight)
     const targetWidth = measuredWidth * scale
     const targetHeight = measuredHeight * scale
-    const x0 = Math.max(parent.x0 + minGap, Math.min(parent.x1 - minGap - targetWidth, cx - targetWidth / 2))
-    const y0 = Math.max(parent.y0 + minGap, Math.min(parent.y1 - minGap - targetHeight, cy - targetHeight / 2))
+    // The largest inner rectangle usually shares the paper center with the outer.
+    // Smaller nested guides keep their observed placement.
+    const targetCx = innerIndex === 0 ? (parent.x0 + parent.x1) / 2 : cx
+    const targetCy = innerIndex === 0 ? (parent.y0 + parent.y1) / 2 : cy
+    const x0 = Math.max(parent.x0 + minGap, Math.min(parent.x1 - minGap - targetWidth, targetCx - targetWidth / 2))
+    const y0 = Math.max(parent.y0 + minGap, Math.min(parent.y1 - minGap - targetHeight, targetCy - targetHeight / 2))
     rects.push({
       path: canonical,
       x0,
