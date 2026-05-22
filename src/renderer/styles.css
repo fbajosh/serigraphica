@@ -234,7 +234,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 
 .guide-line-actions,
-.guide-display-actions {
+.guide-display-actions,
+.mesh-center-actions {
   grid-template-columns: repeat(2, 1fr);
 }
 

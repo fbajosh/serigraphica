@@ -227,6 +227,8 @@ async function exportDewarpedTo(
   quality: number,
   outputPath: string,
   meshCurve?: number,
+  centerLargestInnerHorizontal?: boolean,
+  centerLargestInnerVertical?: boolean,
   onProgress?: (progress: DewarpProgress) => void
 ) {
   return sidecar.call('export_dewarped', {
@@ -234,7 +236,9 @@ async function exportDewarpedTo(
     rectangles,
     output_path: outputPath,
     quality,
-    mesh_curve: meshCurve
+    mesh_curve: meshCurve,
+    center_largest_inner_horizontal: centerLargestInnerHorizontal !== false,
+    center_largest_inner_vertical: centerLargestInnerVertical !== false
   }, onProgress)
 }
 
@@ -290,13 +294,13 @@ ipcMain.handle('export-corrected-as', async (_evt, imagePath: string, corners: n
   return exportCorrectedTo(imagePath, corners, quality, result.filePath)
 })
 
-ipcMain.handle('export-dewarped', async (evt, imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string, meshCurve?: number, fillShapes?: unknown[], fillSampleRegions?: unknown[]) => {
+ipcMain.handle('export-dewarped', async (evt, imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string, meshCurve?: number, centerLargestInnerHorizontal?: boolean, centerLargestInnerVertical?: boolean, fillShapes?: unknown[], fillSampleRegions?: unknown[]) => {
   const outputPath = correctedOutputPath(outputBasePath || imagePath)
-  const result = await exportDewarpedTo(imagePath, rectangles, quality, outputPath, meshCurve, dewarpProgressSender(evt, 'export'))
+  const result = await exportDewarpedTo(imagePath, rectangles, quality, outputPath, meshCurve, centerLargestInnerHorizontal, centerLargestInnerVertical, dewarpProgressSender(evt, 'export'))
   return await applyFillToOutputIfNeeded(outputPath, fillShapes, quality, fillSampleRegions) || result
 })
 
-ipcMain.handle('export-dewarped-as', async (evt, imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string, meshCurve?: number, fillShapes?: unknown[], fillSampleRegions?: unknown[]) => {
+ipcMain.handle('export-dewarped-as', async (evt, imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string, meshCurve?: number, centerLargestInnerHorizontal?: boolean, centerLargestInnerVertical?: boolean, fillShapes?: unknown[], fillSampleRegions?: unknown[]) => {
   const basePath = outputBasePath || imagePath
   const base = basename(basePath, extname(basePath))
   mkdirSync(outputDir, { recursive: true })
@@ -306,7 +310,7 @@ ipcMain.handle('export-dewarped-as', async (evt, imagePath: string, rectangles: 
     filters: [{ name: 'JPEG', extensions: ['jpg', 'jpeg'] }]
   })
   if (result.canceled || !result.filePath) return null
-  const dewarped = await exportDewarpedTo(imagePath, rectangles, quality, result.filePath, meshCurve, dewarpProgressSender(evt, 'export-as'))
+  const dewarped = await exportDewarpedTo(imagePath, rectangles, quality, result.filePath, meshCurve, centerLargestInnerHorizontal, centerLargestInnerVertical, dewarpProgressSender(evt, 'export-as'))
   return await applyFillToOutputIfNeeded(result.filePath, fillShapes, quality, fillSampleRegions) || dewarped
 })
 
@@ -324,9 +328,9 @@ ipcMain.handle('preview-corrected', async (_evt, imagePath: string, corners: num
   }
 })
 
-ipcMain.handle('preview-dewarped', async (evt, imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string, meshCurve?: number) => {
+ipcMain.handle('preview-dewarped', async (evt, imagePath: string, rectangles: unknown[], quality: number, outputBasePath?: string, meshCurve?: number, centerLargestInnerHorizontal?: boolean, centerLargestInnerVertical?: boolean) => {
   const outputPath = previewOutputPath(outputBasePath || imagePath)
-  const result = await exportDewarpedTo(imagePath, rectangles, quality, outputPath, meshCurve, dewarpProgressSender(evt, 'preview')) as {
+  const result = await exportDewarpedTo(imagePath, rectangles, quality, outputPath, meshCurve, centerLargestInnerHorizontal, centerLargestInnerVertical, dewarpProgressSender(evt, 'preview')) as {
     outputWidth: number
     outputHeight: number
   }

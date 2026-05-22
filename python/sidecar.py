@@ -51,7 +51,9 @@ def _export_dewarped(params: dict, progress: ProgressCallback | None = None) -> 
         params["rectangles"],
         params["output_path"],
         int(params.get("quality", 92)),
-        params.get("mesh_curve", 75),
+        params.get("mesh_curve", 100),
+        params.get("center_largest_inner_horizontal", True) is not False,
+        params.get("center_largest_inner_vertical", True) is not False,
         progress,
     )
 

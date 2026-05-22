@@ -11,28 +11,20 @@ type Loaded = {
 }
 
 const DEBUG_OUTLINES_KEY = 'serigraphica.manualOutlines.v3'
-const LEGACY_DEBUG_OUTLINES_KEY = 'serigraphica.manualOutlines.v2'
 const RECTANGLE_COLORS = ['#ff5e5e', '#4ea1ff', '#4de8ff', '#5ee05e', '#ffd84d', '#ff5cff'] as const
+const FIXED_MESH_DIVISIONS = 24
+const FIXED_MESH_CURVE = 100
 
 type SavedManualOutline = {
   version: 3
   filename: string
+  imagePath: string
   savedAt: string
   imageWidth: number
   imageHeight: number
   rectangles: RectPath[]
-  meshDivisions?: number
-  meshCurve?: number
-}
-
-type LegacySavedManualOutline = {
-  version: 2
-  filename: string
-  savedAt: string
-  imageWidth: number
-  imageHeight: number
-  outerPath: RectPath | null
-  innerPath: RectPath | null
+  centerLargestInnerHorizontal?: boolean
+  centerLargestInnerVertical?: boolean
 }
 
 type SavedManualOutlineMeta = {
@@ -40,8 +32,8 @@ type SavedManualOutlineMeta = {
   imageWidth: number
   imageHeight: number
   rectangleNodes: number[]
-  meshDivisions?: number
-  meshCurve?: number
+  centerLargestInnerHorizontal?: boolean
+  centerLargestInnerVertical?: boolean
 }
 
 function imageFilename(path: string): string {
@@ -61,46 +53,25 @@ function writeDebugOutlineStore(store: Record<string, SavedManualOutline>) {
   window.localStorage.setItem(DEBUG_OUTLINES_KEY, JSON.stringify(store))
 }
 
-function getSavedDebugOutline(filename: string): SavedManualOutline | null {
-  const saved = readDebugOutlineStore()[filename]
-  if (saved) return saved
-  try {
-    const raw = window.localStorage.getItem(LEGACY_DEBUG_OUTLINES_KEY)
-    const legacyStore = raw ? JSON.parse(raw) as Record<string, LegacySavedManualOutline> : {}
-    const legacy = legacyStore[filename]
-    if (!legacy) return null
-    return {
-      version: 3,
-      filename,
-      savedAt: legacy.savedAt,
-      imageWidth: legacy.imageWidth,
-      imageHeight: legacy.imageHeight,
-      rectangles: [legacy.outerPath, legacy.innerPath].filter(Boolean) as RectPath[]
-    }
-  } catch {
-    return null
-  }
+function getSavedDebugOutline(imagePath: string): SavedManualOutline | null {
+  return readDebugOutlineStore()[imagePath] ?? null
 }
 
-function getSavedDebugOutlineMeta(filename: string): SavedManualOutlineMeta | null {
-  const saved = getSavedDebugOutline(filename)
+function getSavedDebugOutlineMeta(imagePath: string): SavedManualOutlineMeta | null {
+  const saved = getSavedDebugOutline(imagePath)
   if (!saved) return null
   return {
     savedAt: saved.savedAt,
     imageWidth: saved.imageWidth,
     imageHeight: saved.imageHeight,
     rectangleNodes: saved.rectangles.map((path) => path.nodes.length),
-    meshDivisions: saved.meshDivisions,
-    meshCurve: saved.meshCurve
+    centerLargestInnerHorizontal: saved.centerLargestInnerHorizontal,
+    centerLargestInnerVertical: saved.centerLargestInnerVertical
   }
 }
 
-function isValidMeshDivisions(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 4 && value <= 24
-}
-
-function isValidMeshCurve(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100
+function isBoolean(value: unknown): value is boolean {
+  return typeof value === 'boolean'
 }
 
 function pathFromCorners(corners: Point[]): RectPath {
@@ -412,8 +383,8 @@ export function App() {
   const [status, setStatus] = useState('Open an image to begin')
   const [hideGuides, setHideGuides] = useState(false)
   const [showMesh, setShowMesh] = useState(false)
-  const [meshDivisions, setMeshDivisions] = useState(10)
-  const [meshCurve, setMeshCurve] = useState(75)
+  const [centerLargestInnerHorizontal, setCenterLargestInnerHorizontal] = useState(true)
+  const [centerLargestInnerVertical, setCenterLargestInnerVertical] = useState(true)
   const [zoomLevel, setZoomLevel] = useState(1)
   const [dewarpPreview, setDewarpPreview] = useState<Loaded | null>(null)
   const [dewarpProgress, setDewarpProgress] = useState<DewarpProgress | null>(null)
@@ -424,8 +395,8 @@ export function App() {
   const dewarpCancelRequestedRef = useRef(false)
   const filename = image ? imageFilename(image.path) : ''
 
-  const refreshSavedDebugOutline = useCallback((targetFilename: string) => {
-    setSavedDebugOutline(getSavedDebugOutlineMeta(targetFilename))
+  const refreshSavedDebugOutline = useCallback((imagePath: string) => {
+    setSavedDebugOutline(getSavedDebugOutlineMeta(imagePath))
   }, [])
 
   const applyDetectedGuides = useCallback((result: DetectGuidesResult, baseRectangles: RectPath[]) => {
@@ -452,7 +423,7 @@ export function App() {
 
   const applyLoadedImage = useCallback(async (res: Loaded) => {
     const targetFilename = imageFilename(res.path)
-    const saved = getSavedDebugOutline(targetFilename)
+    const saved = getSavedDebugOutline(res.path)
     const savedRectangles = saved?.rectangles ?? []
     setImage(res)
     setRectangles(savedRectangles)
@@ -467,13 +438,13 @@ export function App() {
     setShowMesh(savedRectangles.length > 0)
     setZoomLevel(1)
     setDewarpPreview(null)
-    if (saved && isValidMeshDivisions(saved.meshDivisions)) setMeshDivisions(saved.meshDivisions)
-    if (saved && isValidMeshCurve(saved.meshCurve)) setMeshCurve(saved.meshCurve)
+    setCenterLargestInnerHorizontal(saved && isBoolean(saved.centerLargestInnerHorizontal) ? saved.centerLargestInnerHorizontal : true)
+    setCenterLargestInnerVertical(saved && isBoolean(saved.centerLargestInnerVertical) ? saved.centerLargestInnerVertical : true)
     const sizeWarning = saved && (saved.imageWidth !== res.width || saved.imageHeight !== res.height)
       ? ' Dimensions differ from the open image.'
       : ''
     setDebugMessage(saved ? `Loaded saved paths for ${targetFilename}.${sizeWarning}` : '')
-    refreshSavedDebugOutline(targetFilename)
+    refreshSavedDebugOutline(res.path)
     if (saved) {
       setStatus(`Loaded saved paths for ${targetFilename}.${sizeWarning}`)
       return
@@ -753,7 +724,12 @@ export function App() {
     setBusy(true)
     setStatus(filledImage ? 'Refilling image...' : 'Filling image...')
     try {
-      const filled = await window.serigraphica.previewFilled(dewarpPreview.path, fillShapes, 98, buildFillSampleRegions(rectangles))
+      const filled = await window.serigraphica.previewFilled(
+        dewarpPreview.path,
+        fillShapes,
+        98,
+        buildFillSampleRegions(rectangles, centerLargestInnerHorizontal, centerLargestInnerVertical)
+      )
       setFilledImage(filled)
       setFillDirty(false)
       setTool('pan')
@@ -763,7 +739,7 @@ export function App() {
     } finally {
       setBusy(false)
     }
-  }, [dewarpPreview, fillDirty, fillShapes, filledImage, image, rectangles])
+  }, [centerLargestInnerHorizontal, centerLargestInnerVertical, dewarpPreview, fillDirty, fillShapes, filledImage, image, rectangles])
 
   const handleExport = useCallback(async () => {
     if (!image) return
@@ -776,14 +752,24 @@ export function App() {
     setStatus(rectangles.length >= 2 ? 'Exporting dewarped image...' : 'Exporting perspective image...')
     try {
       const exportFillShapes = filledImage || fillDirty ? fillShapes : []
-      const out = await window.serigraphica.exportDewarped(image.path, rectangles, 92, image.path, meshCurve, exportFillShapes, buildFillSampleRegions(rectangles))
+      const out = await window.serigraphica.exportDewarped(
+        image.path,
+        rectangles,
+        92,
+        image.path,
+        FIXED_MESH_CURVE,
+        centerLargestInnerHorizontal,
+        centerLargestInnerVertical,
+        exportFillShapes,
+        buildFillSampleRegions(rectangles, centerLargestInnerHorizontal, centerLargestInnerVertical)
+      )
       setStatus(`Exported ${out.outputWidth}x${out.outputHeight} -> ${out.outputPath}`)
     } catch (err) {
       setStatus(`Error: ${(err as Error).message}`)
     } finally {
       setBusy(false)
     }
-  }, [fillDirty, fillShapes, filledImage, image, meshCurve, rectangles])
+  }, [centerLargestInnerHorizontal, centerLargestInnerVertical, fillDirty, fillShapes, filledImage, image, rectangles])
 
   const handleExportAs = useCallback(async () => {
     if (!image) return
@@ -796,7 +782,17 @@ export function App() {
     setStatus(rectangles.length >= 2 ? 'Exporting dewarped image...' : 'Exporting perspective image...')
     try {
       const exportFillShapes = filledImage || fillDirty ? fillShapes : []
-      const out = await window.serigraphica.exportDewarpedAs(image.path, rectangles, 92, image.path, meshCurve, exportFillShapes, buildFillSampleRegions(rectangles))
+      const out = await window.serigraphica.exportDewarpedAs(
+        image.path,
+        rectangles,
+        92,
+        image.path,
+        FIXED_MESH_CURVE,
+        centerLargestInnerHorizontal,
+        centerLargestInnerVertical,
+        exportFillShapes,
+        buildFillSampleRegions(rectangles, centerLargestInnerHorizontal, centerLargestInnerVertical)
+      )
       if (!out) {
         setStatus('Export cancelled')
         return
@@ -807,7 +803,7 @@ export function App() {
     } finally {
       setBusy(false)
     }
-  }, [fillDirty, fillShapes, filledImage, image, meshCurve, rectangles])
+  }, [centerLargestInnerHorizontal, centerLargestInnerVertical, fillDirty, fillShapes, filledImage, image, rectangles])
 
   const handleDewarp = useCallback(async () => {
     if (dewarpProgress) {
@@ -837,7 +833,15 @@ export function App() {
     setDewarpProgress({ percent: 0, stage: 'Starting', operation: 'preview' })
     setStatus('Generating dewarp preview...')
     try {
-      const preview = await window.serigraphica.previewDewarped(image.path, rectangles, 92, image.path, meshCurve)
+      const preview = await window.serigraphica.previewDewarped(
+        image.path,
+        rectangles,
+        92,
+        image.path,
+        FIXED_MESH_CURVE,
+        centerLargestInnerHorizontal,
+        centerLargestInnerVertical
+      )
       setDewarpPreview(preview)
       setFillDirty(Boolean(filledImage))
       setStatus(`Dewarp preview ${preview.width}x${preview.height}`)
@@ -848,10 +852,15 @@ export function App() {
       setDewarpProgress(null)
       setBusy(false)
     }
-  }, [dewarpPreview, dewarpProgress, filledImage, image, meshCurve, rectangles])
+  }, [centerLargestInnerHorizontal, centerLargestInnerVertical, dewarpPreview, dewarpProgress, filledImage, image, rectangles])
 
-  const handleMeshCurveChange = useCallback((value: number) => {
-    setMeshCurve(value)
+  const handleToggleHorizontalCenter = useCallback(() => {
+    setCenterLargestInnerHorizontal((enabled) => !enabled)
+    clearDewarpOutputs()
+  }, [clearDewarpOutputs])
+
+  const handleToggleVerticalCenter = useCallback(() => {
+    setCenterLargestInnerVertical((enabled) => !enabled)
     clearDewarpOutputs()
   }, [clearDewarpOutputs])
 
@@ -880,26 +889,27 @@ export function App() {
     const targetFilename = imageFilename(image.path)
     try {
       const store = readDebugOutlineStore()
-      store[targetFilename] = {
+      store[image.path] = {
         version: 3,
         filename: targetFilename,
+        imagePath: image.path,
         savedAt: new Date().toISOString(),
         imageWidth: image.width,
         imageHeight: image.height,
         rectangles,
-        meshDivisions,
-        meshCurve
+        centerLargestInnerHorizontal,
+        centerLargestInnerVertical
       }
       writeDebugOutlineStore(store)
-      refreshSavedDebugOutline(targetFilename)
-      setDebugMessage(`Saved lines and grid settings for ${targetFilename}`)
-      setStatus(`Saved lines and grid settings for ${targetFilename}`)
+      refreshSavedDebugOutline(image.path)
+      setDebugMessage(`Saved lines and centering settings for ${targetFilename}`)
+      setStatus(`Saved lines and centering settings for ${targetFilename}`)
     } catch (err) {
       const message = `Save failed: ${(err as Error).message}`
       setDebugMessage(message)
       setStatus(message)
     }
-  }, [image, meshCurve, meshDivisions, rectangles, refreshSavedDebugOutline])
+  }, [centerLargestInnerHorizontal, centerLargestInnerVertical, image, rectangles, refreshSavedDebugOutline])
 
   useEffect(() => {
     if (!image) {
@@ -907,7 +917,7 @@ export function App() {
       setDebugMessage('')
       return
     }
-    refreshSavedDebugOutline(imageFilename(image.path))
+    refreshSavedDebugOutline(image.path)
   }, [image, refreshSavedDebugOutline])
 
   useEffect(() => {
@@ -1017,8 +1027,10 @@ export function App() {
             activeRectangleIndex={dewarpActive ? null : activeRectangleIndex}
             hideGuides={hideGuides}
             showMesh={meshVisibleInCanvas}
-            meshDivisions={meshDivisions}
-            meshCurve={meshCurve}
+            meshDivisions={FIXED_MESH_DIVISIONS}
+            meshCurve={FIXED_MESH_CURVE}
+            centerLargestInnerHorizontal={centerLargestInnerHorizontal}
+            centerLargestInnerVertical={centerLargestInnerVertical}
             meshColor="inverse"
             onViewChange={setZoomLevel}
             onAppendCorner={handleAppendCorner}
@@ -1100,30 +1112,24 @@ export function App() {
         </section>
         <section className="panel-workflow-section">
           <h3>Mesh</h3>
-          <div className="row">
-            <label>Grid Density</label>
-            <span>{meshDivisions}x{meshDivisions}</span>
+          <div className="path-actions mesh-center-actions">
+            <ToolButton
+              active={centerLargestInnerHorizontal}
+              onClick={handleToggleHorizontalCenter}
+              disabled={!image}
+              title="Center the largest inner rectangle horizontally within the outer mesh"
+            >
+              H Center
+            </ToolButton>
+            <ToolButton
+              active={centerLargestInnerVertical}
+              onClick={handleToggleVerticalCenter}
+              disabled={!image}
+              title="Center the largest inner rectangle vertically within the outer mesh"
+            >
+              V Center
+            </ToolButton>
           </div>
-          <input
-            type="range"
-            min={4}
-            max={24}
-            value={meshDivisions}
-            onChange={(e) => setMeshDivisions(Number(e.target.value))}
-            style={{ width: '100%' }}
-          />
-          <div className="row">
-            <label>Grid Curve</label>
-            <span>{meshCurve}%</span>
-          </div>
-          <input
-            type="range"
-            min={0}
-            max={100}
-            value={meshCurve}
-            onChange={(e) => handleMeshCurveChange(Number(e.target.value))}
-            style={{ width: '100%' }}
-          />
           <ToolButton active={dewarpActive} onClick={handleDewarp} disabled={!image || rectangles.length < 1 || (busy && !dewarpProgress)} title="Toggle dewarp preview" className={`${dewarpButtonClass} mesh-dewarp-button`}>
             {dewarpButtonLabel}
           </ToolButton>

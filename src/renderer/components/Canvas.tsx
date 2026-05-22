@@ -44,6 +44,8 @@ type Props = {
   showMesh: boolean
   meshDivisions: number
   meshCurve: number
+  centerLargestInnerHorizontal: boolean
+  centerLargestInnerVertical: boolean
   meshColor: string
   onViewChange: (zoom: number) => void
   onAppendCorner: (point: Point) => void
@@ -499,7 +501,12 @@ function buildBandPatches(parent: TargetRect, child: TargetRect): MeshPatch[] {
   ]
 }
 
-function buildNestedMeshLayout(outerPath: RectPath, innerPaths: RectPath[]): MeshLayout {
+function buildNestedMeshLayout(
+  outerPath: RectPath,
+  innerPaths: RectPath[],
+  centerLargestInnerHorizontal = true,
+  centerLargestInnerVertical = true
+): MeshLayout {
   const outer = canonicalizePath(outerPath)
   const width = Math.max(1, (boundaryLength(outer.boundaries.top) + boundaryLength(outer.boundaries.bottom)) / 2)
   const height = Math.max(1, (boundaryLength(outer.boundaries.left) + boundaryLength(outer.boundaries.right)) / 2)
@@ -523,8 +530,8 @@ function buildNestedMeshLayout(outerPath: RectPath, innerPaths: RectPath[]): Mes
     const targetHeight = measuredHeight * scale
     // The largest inner rectangle usually shares the paper center with the outer.
     // Smaller nested guides keep their observed placement.
-    const targetCx = innerIndex === 0 ? (parent.x0 + parent.x1) / 2 : cx
-    const targetCy = innerIndex === 0 ? (parent.y0 + parent.y1) / 2 : cy
+    const targetCx = innerIndex === 0 && centerLargestInnerHorizontal ? (parent.x0 + parent.x1) / 2 : cx
+    const targetCy = innerIndex === 0 && centerLargestInnerVertical ? (parent.y0 + parent.y1) / 2 : cy
     const x0 = Math.max(parent.x0 + minGap, Math.min(parent.x1 - minGap - targetWidth, targetCx - targetWidth / 2))
     const y0 = Math.max(parent.y0 + minGap, Math.min(parent.y1 - minGap - targetHeight, targetCy - targetHeight / 2))
     rects.push({
@@ -552,10 +559,10 @@ function buildNestedMeshLayout(outerPath: RectPath, innerPaths: RectPath[]): Mes
   return { width, height, rects, patches }
 }
 
-export function buildFillSampleRegions(rectangles: RectPath[]): FillSampleRegion[] {
+export function buildFillSampleRegions(rectangles: RectPath[], centerLargestInnerHorizontal = true, centerLargestInnerVertical = true): FillSampleRegion[] {
   const { outerPath, innerPaths } = deriveRectangleRoles(rectangles)
   if (!outerPath || innerPaths.length === 0) return []
-  const layout = buildNestedMeshLayout(outerPath, innerPaths)
+  const layout = buildNestedMeshLayout(outerPath, innerPaths, centerLargestInnerHorizontal, centerLargestInnerVertical)
   const largestInner = layout.rects[1]
   if (!largestInner || largestInner.y0 <= 1) return []
   return [{
@@ -884,6 +891,8 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     showMesh,
     meshDivisions,
     meshCurve,
+    centerLargestInnerHorizontal,
+    centerLargestInnerVertical,
     meshColor,
     onViewChange,
     onAppendCorner,
@@ -912,8 +921,8 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
   const [containerSize, setContainerSize] = useState({ w: 0, h: 0 })
   const [imageReady, setImageReady] = useState(false)
 
-  const propsRef = useRef({ tool, rectangles, draft, fillShapes, fillDraft, activeFillShapeIndex, activeRectangleIndex, hideGuides, showMesh, meshDivisions, meshCurve, meshColor })
-  propsRef.current = { tool, rectangles, draft, fillShapes, fillDraft, activeFillShapeIndex, activeRectangleIndex, hideGuides, showMesh, meshDivisions, meshCurve, meshColor }
+  const propsRef = useRef({ tool, rectangles, draft, fillShapes, fillDraft, activeFillShapeIndex, activeRectangleIndex, hideGuides, showMesh, meshDivisions, meshCurve, centerLargestInnerHorizontal, centerLargestInnerVertical, meshColor })
+  propsRef.current = { tool, rectangles, draft, fillShapes, fillDraft, activeFillShapeIndex, activeRectangleIndex, hideGuides, showMesh, meshDivisions, meshCurve, centerLargestInnerHorizontal, centerLargestInnerVertical, meshColor }
 
   useLayoutEffect(() => {
     const el = containerRef.current
@@ -1099,9 +1108,9 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     [hideGuides, imageToScreen]
   )
 
-  const drawProjectedMesh = useCallback((ctx: CanvasRenderingContext2D, outer: RectPath, innerPaths: RectPath[], divisions: number, curve: number, color: string) => {
+  const drawProjectedMesh = useCallback((ctx: CanvasRenderingContext2D, outer: RectPath, innerPaths: RectPath[], divisions: number, curve: number, centerHorizontal: boolean, centerVertical: boolean, color: string) => {
     const safeDivisions = Math.max(2, Math.min(40, Math.round(divisions)))
-    const layout = buildNestedMeshLayout(outer, innerPaths)
+    const layout = buildNestedMeshLayout(outer, innerPaths, centerHorizontal, centerVertical)
     ctx.save()
     ctx.lineWidth = 1
     ctx.globalAlpha = 0.72
@@ -1307,6 +1316,8 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       showMesh: meshVisible,
       meshDivisions: curMeshDivisions,
       meshCurve: curMeshCurve,
+      centerLargestInnerHorizontal: curCenterLargestInnerHorizontal,
+      centerLargestInnerVertical: curCenterLargestInnerVertical,
       meshColor: curMeshColor
     } = propsRef.current
     const derived = deriveRectangleRoles(currentRectangles)
@@ -1326,7 +1337,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
         }
         effectiveMeshColor = inverseColorRef.current.color
       }
-      drawProjectedMesh(ctx, derived.outerPath, derived.innerPaths, curMeshDivisions, curMeshCurve, effectiveMeshColor)
+      drawProjectedMesh(ctx, derived.outerPath, derived.innerPaths, curMeshDivisions, curMeshCurve, curCenterLargestInnerHorizontal, curCenterLargestInnerVertical, effectiveMeshColor)
     }
     currentRectangles.forEach((path, index) => {
       drawPath(ctx, path, index, derived.outerIndex, currentActiveRectangleIndex, editingRectangle, 1)
@@ -1364,7 +1375,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
 
   useEffect(() => {
     requestDraw()
-  }, [containerSize, imageReady, rectangles, draft, fillShapes, fillDraft, activeFillShapeIndex, activeRectangleIndex, tool, hideGuides, showMesh, meshDivisions, meshCurve, meshColor, editDragKey, requestDraw])
+  }, [containerSize, imageReady, rectangles, draft, fillShapes, fillDraft, activeFillShapeIndex, activeRectangleIndex, tool, hideGuides, showMesh, meshDivisions, meshCurve, centerLargestInnerHorizontal, centerLargestInnerVertical, meshColor, editDragKey, requestDraw])
 
   const findSegmentHit = useCallback((rectangleIndex: number, screenPoint: Point): HoverSegment => {
     const path = pathForIndex(rectangleIndex)

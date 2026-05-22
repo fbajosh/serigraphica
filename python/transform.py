@@ -71,9 +71,9 @@ def _lerp(a: Point, b: Point, t: float) -> Point:
 
 def _mesh_curve_strength(mesh_curve: float | int | None) -> float:
     try:
-        value = float(mesh_curve if mesh_curve is not None else 75.0)
+        value = float(mesh_curve if mesh_curve is not None else 100.0)
     except (TypeError, ValueError):
-        value = 75.0
+        value = 100.0
     return max(0.0, min(1.0, value / 100.0))
 
 
@@ -426,7 +426,12 @@ def _band_patches(parent: dict, child: dict) -> list[dict]:
     ]
 
 
-def _build_nested_mesh_layout(outer_path: dict, inner_paths: list[dict]) -> dict:
+def _build_nested_mesh_layout(
+    outer_path: dict,
+    inner_paths: list[dict],
+    center_largest_inner_horizontal: bool = True,
+    center_largest_inner_vertical: bool = True,
+) -> dict:
     outer = _canonicalize_path(outer_path)
     width = max(1.0, (_boundary_length(outer["boundaries"]["top"]) + _boundary_length(outer["boundaries"]["bottom"])) / 2)
     height = max(1.0, (_boundary_length(outer["boundaries"]["left"]) + _boundary_length(outer["boundaries"]["right"])) / 2)
@@ -448,8 +453,8 @@ def _build_nested_mesh_layout(outer_path: dict, inner_paths: list[dict]) -> dict
         target_height = measured_height * scale
         # The largest inner rectangle usually shares the paper center with the outer.
         # Smaller nested guides keep their observed placement.
-        target_cx = (parent["x0"] + parent["x1"]) / 2 if inner_index == 0 else cx
-        target_cy = (parent["y0"] + parent["y1"]) / 2 if inner_index == 0 else cy
+        target_cx = (parent["x0"] + parent["x1"]) / 2 if inner_index == 0 and center_largest_inner_horizontal else cx
+        target_cy = (parent["y0"] + parent["y1"]) / 2 if inner_index == 0 and center_largest_inner_vertical else cy
         x0 = max(parent["x0"] + min_gap, min(parent["x1"] - min_gap - target_width, target_cx - target_width / 2))
         y0 = max(parent["y0"] + min_gap, min(parent["y1"] - min_gap - target_height, target_cy - target_height / 2))
         rects.append({"path": canonical, "x0": x0, "y0": y0, "x1": x0 + target_width, "y1": y0 + target_height})
@@ -595,7 +600,12 @@ def _transform_nested_chunk(layout: dict, points: np.ndarray, mesh_curve: float 
     return out[:, 0], out[:, 1]
 
 
-def _mesh_layout(outer_path: dict, inner_paths: list[dict]) -> dict:
+def _mesh_layout(
+    outer_path: dict,
+    inner_paths: list[dict],
+    center_largest_inner_horizontal: bool = True,
+    center_largest_inner_vertical: bool = True,
+) -> dict:
     outer = _boundaries(outer_path)
     width = max(1.0, (_boundary_length(outer["top"]) + _boundary_length(outer["bottom"])) / 2)
     height = max(1.0, (_boundary_length(outer["left"]) + _boundary_length(outer["right"])) / 2)
@@ -615,8 +625,8 @@ def _mesh_layout(outer_path: dict, inner_paths: list[dict]) -> dict:
         cx = width * ((left_u + right_u) / 2)
         cy = height * ((top_v + bottom_v) / 2)
         # Keep this legacy TPS layout consistent with the nested mesh layout.
-        target_cx = width / 2 if inner_index == 0 else cx
-        target_cy = height / 2 if inner_index == 0 else cy
+        target_cx = width / 2 if inner_index == 0 and center_largest_inner_horizontal else cx
+        target_cy = height / 2 if inner_index == 0 and center_largest_inner_vertical else cy
         x0 = max(min_gap, min(width - min_gap - inner_width, target_cx - inner_width / 2))
         y0 = max(min_gap, min(height - min_gap - inner_height, target_cy - inner_height / 2))
         inner_rects.append({
@@ -694,8 +704,13 @@ def _add_constraint(
     weights.append(weight)
 
 
-def _build_dewarp_model(outer_path: dict, inner_paths: list[dict]) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray]:
-    layout = _mesh_layout(outer_path, inner_paths)
+def _build_dewarp_model(
+    outer_path: dict,
+    inner_paths: list[dict],
+    center_largest_inner_horizontal: bool = True,
+    center_largest_inner_vertical: bool = True,
+) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray]:
+    layout = _mesh_layout(outer_path, inner_paths, center_largest_inner_horizontal, center_largest_inner_vertical)
     targets: list[Point] = []
     sources: list[Point] = []
     weights: list[float] = []
@@ -1263,7 +1278,9 @@ def export_dewarped(
     rectangles: list[dict],
     output_path: str,
     quality: int = 92,
-    mesh_curve: float | int | None = 75.0,
+    mesh_curve: float | int | None = 100.0,
+    center_largest_inner_horizontal: bool = True,
+    center_largest_inner_vertical: bool = True,
     progress: ProgressCallback | None = None,
 ) -> dict:
     _emit_progress(progress, 2, "Loading image")
@@ -1283,7 +1300,12 @@ def export_dewarped(
         return result
 
     _emit_progress(progress, 10, "Building mesh")
-    layout = _build_nested_mesh_layout(outer_path, inner_paths)
+    layout = _build_nested_mesh_layout(
+        outer_path,
+        inner_paths,
+        center_largest_inner_horizontal,
+        center_largest_inner_vertical,
+    )
     _emit_progress(progress, 18, "Generating map")
     width = max(1, int(round(layout["width"])))
     height = max(1, int(round(layout["height"])))
