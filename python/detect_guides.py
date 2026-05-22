@@ -441,8 +441,82 @@ def _fit_side_node(score_map: PointArray, p0: PointArray, p1: PointArray) -> tup
     return point.astype(np.float64), handle.astype(np.float64)
 
 
+def _fit_side_line(score_map: PointArray, p0: PointArray, p1: PointArray) -> tuple[PointArray, PointArray] | None:
+    side = p1 - p0
+    side_len = float(np.linalg.norm(side))
+    if side_len < 12.0:
+        return None
+    direction = side / side_len
+    normal = np.array([-direction[1], direction[0]], dtype=np.float64)
+    band = min(50.0, max(8.0, side_len * 0.04))
+    offsets = np.linspace(-band, band, max(17, int(band * 2) + 1))
+    points: list[PointArray] = []
+    weights: list[float] = []
+
+    # Use interior side evidence so thick/rounded/noisy corners do not bias the corner itself.
+    for t in np.linspace(0.06, 0.94, 45):
+        center = p0 + side * t
+        best_score = 0.0
+        best_point: PointArray | None = None
+        for offset in offsets:
+            point = center + normal * offset
+            score = _bilinear(score_map, float(point[0]), float(point[1]))
+            if score > best_score:
+                best_score = score
+                best_point = point
+        if best_point is not None and best_score > 0.18:
+            points.append(best_point.astype(np.float64))
+            weights.append(best_score)
+
+    if len(points) < 8:
+        return None
+    samples = np.array(points, dtype=np.float64)
+    line = cv2.fitLine(samples.astype(np.float32), cv2.DIST_L2, 0, 0.01, 0.01).reshape(-1)
+    fitted_direction = np.array([float(line[0]), float(line[1])], dtype=np.float64)
+    fitted_len = float(np.linalg.norm(fitted_direction))
+    if fitted_len < 1e-9:
+        return None
+    fitted_direction /= fitted_len
+    if float(fitted_direction @ direction) < 0:
+        fitted_direction *= -1
+    weight_arr = np.maximum(np.array(weights, dtype=np.float64), 1e-6)
+    point = np.average(samples, axis=0, weights=weight_arr)
+    return point.astype(np.float64), fitted_direction.astype(np.float64)
+
+
+def _line_intersection(line_a: tuple[PointArray, PointArray] | None, line_b: tuple[PointArray, PointArray] | None) -> PointArray | None:
+    if line_a is None or line_b is None:
+        return None
+    p, r = line_a
+    q, s = line_b
+    cross = float(r[0] * s[1] - r[1] * s[0])
+    if abs(cross) < 1e-4:
+        return None
+    qp = q - p
+    t = float((qp[0] * s[1] - qp[1] * s[0]) / cross)
+    return (p + r * t).astype(np.float64)
+
+
+def _refine_corners_from_side_lines(score_map: PointArray, corners: PointArray) -> PointArray:
+    lines = [_fit_side_line(score_map, corners[index], corners[(index + 1) % 4]) for index in range(4)]
+    refined = corners.copy()
+    for index in range(4):
+        intersection = _line_intersection(lines[(index - 1) % 4], lines[index])
+        if intersection is None:
+            continue
+        prev_len = float(np.linalg.norm(corners[index] - corners[(index - 1) % 4]))
+        next_len = float(np.linalg.norm(corners[(index + 1) % 4] - corners[index]))
+        max_shift = min(42.0, max(6.0, min(prev_len, next_len) * 0.08))
+        shift = intersection - corners[index]
+        shift_len = float(np.linalg.norm(shift))
+        if shift_len > max_shift:
+            intersection = corners[index] + shift * (max_shift / max(shift_len, 1e-6))
+        refined[index] = intersection
+    return _order_corners(refined)
+
+
 def _candidate_to_path(candidate: QuadCandidate, score_map: PointArray, scale: float) -> dict:
-    corners = candidate.corners
+    corners = _refine_corners_from_side_lines(score_map, candidate.corners)
     nodes: list[dict] = []
     corner_indices: list[int] = []
     for index in range(4):

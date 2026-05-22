@@ -399,6 +399,7 @@ export function App() {
   const [savedDebugOutline, setSavedDebugOutline] = useState<SavedManualOutlineMeta | null>(null)
   const canvasRef = useRef<CanvasHandle>(null)
   const dewarpCancelRequestedRef = useRef(false)
+  const dewarpPreviewInFlightRef = useRef(false)
   const filename = image ? imageFilename(image.path) : ''
 
   const refreshSavedDebugOutline = useCallback((imagePath: string) => {
@@ -840,6 +841,7 @@ export function App() {
     }
     setBusy(true)
     dewarpCancelRequestedRef.current = false
+    dewarpPreviewInFlightRef.current = true
     setDewarpProgress({ percent: 0, stage: 'Starting', operation: 'preview' })
     setStatus('Generating dewarp preview...')
     try {
@@ -859,6 +861,7 @@ export function App() {
       setStatus(dewarpCancelRequestedRef.current ? 'Dewarp cancelled' : `Error: ${(err as Error).message}`)
     } finally {
       dewarpCancelRequestedRef.current = false
+      dewarpPreviewInFlightRef.current = false
       setDewarpProgress(null)
       setBusy(false)
     }
@@ -933,6 +936,7 @@ export function App() {
   useEffect(() => {
     return window.serigraphica.onDewarpProgress((progress) => {
       if (progress.operation !== 'preview') return
+      if (!dewarpPreviewInFlightRef.current) return
       setDewarpProgress(progress)
     })
   }, [])

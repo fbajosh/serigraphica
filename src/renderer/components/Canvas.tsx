@@ -956,6 +956,15 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     requestAnimationFrame(() => drawRef.current())
   }, [])
 
+  const clampViewToVisibleImage = useCallback((view: View = viewRef.current) => {
+    const { w, h } = containerSize
+    if (w <= 0 || h <= 0) return
+    const scaledWidth = imageWidth * view.scale
+    const scaledHeight = imageHeight * view.scale
+    view.tx = Math.max(1 - scaledWidth, Math.min(w - 1, view.tx))
+    view.ty = Math.max(1 - scaledHeight, Math.min(h - 1, view.ty))
+  }, [containerSize, imageHeight, imageWidth])
+
   const fitToView = useCallback(() => {
     const { w, h } = containerSize
     if (w === 0 || h === 0) return
@@ -968,9 +977,10 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       tx: (w - imageWidth * scale) / 2,
       ty: (h - imageHeight * scale) / 2
     }
+    clampViewToVisibleImage()
     onViewChange(scale)
     requestDraw()
-  }, [containerSize, imageWidth, imageHeight, onViewChange, requestDraw])
+  }, [clampViewToVisibleImage, containerSize, imageWidth, imageHeight, onViewChange, requestDraw])
 
   const zoomToActualSize = useCallback(() => {
     const { w, h } = containerSize
@@ -979,9 +989,10 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       tx: (w - imageWidth) / 2,
       ty: (h - imageHeight) / 2
     }
+    clampViewToVisibleImage()
     onViewChange(1)
     requestDraw()
-  }, [containerSize, imageWidth, imageHeight, onViewChange, requestDraw])
+  }, [clampViewToVisibleImage, containerSize, imageWidth, imageHeight, onViewChange, requestDraw])
 
   useEffect(() => {
     if (imageReady && containerSize.w > 0) fitToView()
@@ -1637,6 +1648,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       if (drag.kind === 'pan') {
         viewRef.current.tx += screenPoint[0] - drag.lastX
         viewRef.current.ty += screenPoint[1] - drag.lastY
+        clampViewToVisibleImage()
         drag.lastX = screenPoint[0]
         drag.lastY = screenPoint[1]
         requestDraw()
@@ -1666,6 +1678,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       findEditHit,
       findFillPointHit,
       findSegmentHitAny,
+      clampViewToVisibleImage,
       imageHeight,
       imageWidth,
       onHandleChange,
@@ -1711,16 +1724,18 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
         v.scale = nextScale
         v.tx = x - ix * nextScale
         v.ty = y - iy * nextScale
+        clampViewToVisibleImage(v)
         onViewChange(nextScale)
       } else {
         viewRef.current.tx -= e.deltaX
         viewRef.current.ty -= e.deltaY
+        clampViewToVisibleImage()
       }
       requestDraw()
     }
     canvas.addEventListener('wheel', onWheel, { passive: false })
     return () => canvas.removeEventListener('wheel', onWheel)
-  }, [onViewChange, requestDraw])
+  }, [clampViewToVisibleImage, onViewChange, requestDraw])
 
   return (
     <div ref={containerRef} style={{ position: 'absolute', inset: 0 }}>
