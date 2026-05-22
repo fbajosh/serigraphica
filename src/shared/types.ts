@@ -25,7 +25,7 @@ export type RectPath = {
 }
 
 export type FillShape = {
-  points: Quad
+  points: Point[]
 }
 
 export type FillSampleRegion = {

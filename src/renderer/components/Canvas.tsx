@@ -54,7 +54,7 @@ type Props = {
   onInsertNode: (rectangleIndex: number, segmentIndex: number, node: BezierNode) => void
   onDeleteNode: (rectangleIndex: number, nodeIndex: number) => void
   onActivateRectangle: (rectangleIndex: number) => void
-  onAppendFillPoint: (point: Point) => void
+  onAppendFillPoint: (point: Point, keepOpen: boolean) => void
   onFillPointChange: (shapeIndex: number, pointIndex: number, point: Point) => void
   onDeleteFillPoint: (shapeIndex: number | null, pointIndex: number) => void
   onActivateFillShape: (shapeIndex: number) => void
@@ -1541,7 +1541,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
           canvas.setPointerCapture(e.pointerId)
           return
         }
-        onAppendFillPoint(clampPoint(screenToImage(screenPoint[0], screenPoint[1]), imageWidth, imageHeight))
+        onAppendFillPoint(clampPoint(screenToImage(screenPoint[0], screenPoint[1]), imageWidth, imageHeight), e.shiftKey)
         requestDraw()
         return
       }

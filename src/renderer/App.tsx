@@ -368,6 +368,12 @@ function overlapsAnyFillShape(candidate: FillShape, shapes: FillShape[], ignoreI
   return shapes.some((shape, index) => index !== ignoreIndex && polygonsOverlap(candidate.points, shape.points))
 }
 
+function fillDraftStatus(pointCount: number): string {
+  if (pointCount <= 0) return 'Fill: click point 1 of 4'
+  if (pointCount < 4) return `Fill: click point ${pointCount + 1} of 4`
+  return `Fill: ${pointCount} points. Release Shift to close or click another point.`
+}
+
 export function App() {
   const [image, setImage] = useState<Loaded | null>(null)
   const [tool, setTool] = useState<Tool>('pen-rectangle')
@@ -546,7 +552,7 @@ export function App() {
     }
     setTool('fill')
     setDraft([])
-    setStatus(fillDraft.length ? `Fill: click point ${fillDraft.length + 1} of 4` : 'Fill: click four points around the object to remove')
+    setStatus(fillDraft.length ? fillDraftStatus(fillDraft.length) : 'Fill: click four points around the object to remove')
   }, [dewarpPreview, fillDraft.length, image])
 
   const handleResetAll = useCallback(() => {
@@ -641,40 +647,44 @@ export function App() {
       }
       return
     }
-    if (!node.touched) {
-      setStatus('Auto side nodes are reset by redetect; move the node before deleting it')
-      return
-    }
     setRectangleAt(rectangleIndex, (prevPath) => deletePathNode(prevPath, nodeIndex))
     setActiveRectangleIndex(rectangleIndex)
     clearDewarpOutputs()
     setStatus('Rectangle node deleted')
   }, [clearDewarpOutputs, rectangles, setRectangleAt])
 
-  const handleAppendFillPoint = useCallback((point: Point) => {
+  const closeFillDraft = useCallback((points: Point[]) => {
+    if (points.length < 4) return false
+    const shape: FillShape = { points }
+    if (overlapsAnyFillShape(shape, fillShapes)) {
+      setStatus('Fill shapes cannot overlap')
+      return false
+    }
+    setFillShapes((prev) => {
+      setActiveFillShapeIndex(prev.length)
+      return [...prev, shape]
+    })
+    setFillDraft([])
+    markFillDirty()
+    setStatus('Fill shape added. Click again to start another fill shape.')
+    return true
+  }, [fillShapes, markFillDirty])
+
+  const handleAppendFillPoint = useCallback((point: Point, keepOpen: boolean) => {
     const next = [...fillDraft, point]
-    if (next.length >= 4) {
-      const shape: FillShape = { points: next.slice(0, 4) as Quad }
-      if (overlapsAnyFillShape(shape, fillShapes)) {
-        setStatus('Fill shapes cannot overlap')
-        return
-      }
-      setFillShapes((prev) => [...prev, shape])
-      setActiveFillShapeIndex(fillShapes.length)
-      setFillDraft([])
-      markFillDirty()
-      setStatus('Fill shape added. Click again to start another fill shape.')
+    if (next.length >= 4 && !keepOpen) {
+      closeFillDraft(next)
       return
     }
     setFillDraft(next)
     setActiveFillShapeIndex(null)
-    setStatus(`Fill: click point ${next.length + 1} of 4`)
-  }, [fillDraft, fillShapes, markFillDirty])
+    setStatus(fillDraftStatus(next.length))
+  }, [closeFillDraft, fillDraft])
 
   const handleFillPointChange = useCallback((shapeIndex: number, pointIndex: number, point: Point) => {
     const current = fillShapes[shapeIndex]
     if (!current) return
-    const points = current.points.map((existing, index) => (index === pointIndex ? point : existing)) as Quad
+    const points = current.points.map((existing, index) => (index === pointIndex ? point : existing))
     const nextShape: FillShape = { points }
     if (overlapsAnyFillShape(nextShape, fillShapes, shapeIndex)) {
       setStatus('Fill shapes cannot overlap')
@@ -948,7 +958,7 @@ export function App() {
         e.preventDefault()
         setFillDraft((prev) => {
           const next = prev.slice(0, -1)
-          setStatus(next.length ? `Fill: click point ${next.length + 1} of 4` : 'Fill: click point 1 of 4')
+          setStatus(fillDraftStatus(next.length))
           return next
         })
       } else if (e.key === 'Escape' && draft.length > 0) {
@@ -965,9 +975,21 @@ export function App() {
         handleDrawMode()
       }
     }
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (!image) return
+      if (e.target instanceof HTMLElement && ['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return
+      if (e.key === 'Shift' && tool === 'fill' && fillDraft.length >= 4) {
+        e.preventDefault()
+        closeFillDraft(fillDraft)
+      }
+    }
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [draft.length, fillDraft.length, handleDrawMode, image])
+    window.addEventListener('keyup', onKeyUp)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('keyup', onKeyUp)
+    }
+  }, [closeFillDraft, draft.length, fillDraft, fillDraft.length, handleDrawMode, image, tool])
 
   const derivedRectangles = deriveRectangles(rectangles)
   const outerCorners = pathCorners(derivedRectangles.outerPath)
@@ -977,7 +999,8 @@ export function App() {
   const displayImage = activeFilledImage ?? dewarpPreview ?? image
   const meshVisibleInCanvas = showMesh && !dewarpActive
   const fillOverlayVisible = dewarpActive && !activeFilledImage
-  const fillButtonLabel = filledImage ? (fillDirty ? 'Refill' : 'Unfill') : 'Fill'
+  const fillButtonAction = filledImage ? (fillDirty ? 'Refill' : 'Unfill') : 'Fill'
+  const fillButtonLabel = `${fillButtonAction} ${fillShapes.length}`
   const fillActionEnabled = !busy && ((filledImage && !fillDirty) || (dewarpActive && fillShapes.length > 0))
   const saveLinesLabel = savedDebugOutline ? 'Resave Lines' : 'Save Lines'
   const dewarpButtonLabel = dewarpProgress
@@ -1112,23 +1135,28 @@ export function App() {
         </section>
         <section className="panel-workflow-section">
           <h3>Mesh</h3>
-          <div className="path-actions mesh-center-actions">
-            <ToolButton
-              active={centerLargestInnerHorizontal}
-              onClick={handleToggleHorizontalCenter}
-              disabled={!image}
-              title="Center the largest inner rectangle horizontally within the outer mesh"
-            >
-              H Center
-            </ToolButton>
-            <ToolButton
-              active={centerLargestInnerVertical}
-              onClick={handleToggleVerticalCenter}
-              disabled={!image}
-              title="Center the largest inner rectangle vertically within the outer mesh"
-            >
-              V Center
-            </ToolButton>
+          <div className="mesh-center-row">
+            <span className="mesh-center-title">Center</span>
+            <div className="mesh-center-options">
+              <label className="mesh-center-option" title="Center the largest inner rectangle horizontally within the outer mesh">
+                <input
+                  type="checkbox"
+                  checked={centerLargestInnerHorizontal}
+                  onChange={handleToggleHorizontalCenter}
+                  disabled={!image}
+                />
+                <span>Horizontal</span>
+              </label>
+              <label className="mesh-center-option" title="Center the largest inner rectangle vertically within the outer mesh">
+                <input
+                  type="checkbox"
+                  checked={centerLargestInnerVertical}
+                  onChange={handleToggleVerticalCenter}
+                  disabled={!image}
+                />
+                <span>Vertical</span>
+              </label>
+            </div>
           </div>
           <ToolButton active={dewarpActive} onClick={handleDewarp} disabled={!image || rectangles.length < 1 || (busy && !dewarpProgress)} title="Toggle dewarp preview" className={`${dewarpButtonClass} mesh-dewarp-button`}>
             {dewarpButtonLabel}
@@ -1136,10 +1164,6 @@ export function App() {
         </section>
         <section className="panel-workflow-section">
           <h3>Fill</h3>
-          <div className="row">
-            <label>Shapes</label>
-            <span>{fillShapes.length}{fillDraft.length ? ` + ${fillDraft.length}/4 draft` : ''}</span>
-          </div>
           <div className="path-actions fill-actions">
             <ToolButton active={dewarpActive && tool === 'fill'} onClick={handleFillAddMode} disabled={!dewarpActive || busy} title="Add fill shape">
               Add

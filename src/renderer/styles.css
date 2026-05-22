@@ -234,9 +234,47 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 
 .guide-line-actions,
-.guide-display-actions,
-.mesh-center-actions {
+.guide-display-actions {
   grid-template-columns: repeat(2, 1fr);
+}
+
+.mesh-center-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 12px;
+  margin-top: 2px;
+  color: #aaa;
+}
+
+.mesh-center-title {
+  color: #aaa;
+}
+
+.mesh-center-options {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  min-width: 0;
+}
+
+.mesh-center-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: #ddd;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.mesh-center-option input {
+  margin: 0;
+  accent-color: #ff5e5e;
+}
+
+.mesh-center-option input:disabled + span {
+  color: #666;
 }
 
 .fill-actions {
