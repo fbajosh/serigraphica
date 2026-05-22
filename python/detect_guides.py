@@ -497,6 +497,95 @@ def _line_intersection(line_a: tuple[PointArray, PointArray] | None, line_b: tup
     return (p + r * t).astype(np.float64)
 
 
+def _line_distance(point: PointArray, line: tuple[PointArray, PointArray] | None) -> float:
+    if line is None:
+        return 0.0
+    line_point, direction = line
+    return float(abs((point[0] - line_point[0]) * direction[1] - (point[1] - line_point[1]) * direction[0]))
+
+
+def _ray_score(score_map: PointArray, origin: PointArray, direction: PointArray, length: float, start: float = 0.0) -> float:
+    direction_len = float(np.linalg.norm(direction))
+    if direction_len < 1e-9 or length <= start:
+        return 0.0
+    unit = direction / direction_len
+    samples = np.linspace(start, length, 15)
+    total = 0.0
+    weight_sum = 0.0
+    for t in samples:
+        # Emphasize the samples closest to the candidate corner so endpoints snap tightly.
+        weight = 1.0 / (1.0 + t * 0.08)
+        point = origin + unit * t
+        total += _bilinear(score_map, float(point[0]), float(point[1])) * weight
+        weight_sum += weight
+    return float(total / max(weight_sum, 1e-6))
+
+
+def _snap_corner_to_local_response(
+    score_map: PointArray,
+    corner_response: PointArray,
+    corner: PointArray,
+    prev_corner: PointArray,
+    next_corner: PointArray,
+    prev_line: tuple[PointArray, PointArray] | None,
+    next_line: tuple[PointArray, PointArray] | None,
+) -> PointArray:
+    prev_vec = prev_corner - corner
+    next_vec = next_corner - corner
+    prev_len = float(np.linalg.norm(prev_vec))
+    next_len = float(np.linalg.norm(next_vec))
+    if prev_len < 1.0 or next_len < 1.0:
+        return corner
+    prev_dir = prev_vec / prev_len
+    next_dir = next_vec / next_len
+    h, w = score_map.shape[:2]
+    radius = min(36.0, max(8.0, min(prev_len, next_len) * 0.04))
+    x0 = max(0, int(np.floor(corner[0] - radius)))
+    y0 = max(0, int(np.floor(corner[1] - radius)))
+    x1 = min(w - 1, int(np.ceil(corner[0] + radius)))
+    y1 = min(h - 1, int(np.ceil(corner[1] + radius)))
+    if x1 <= x0 or y1 <= y0:
+        return corner
+
+    local = corner_response[y0:y1 + 1, x0:x1 + 1]
+    if local.size == 0:
+        return corner
+    flat = local.reshape(-1)
+    if float(np.max(flat)) <= 1e-8:
+        return corner
+    candidate_count = min(180, flat.size)
+    candidate_indices = np.argpartition(flat, -candidate_count)[-candidate_count:]
+    ray_len = min(80.0, max(18.0, min(prev_len, next_len) * 0.12))
+    outside_len = min(28.0, max(8.0, ray_len * 0.42))
+    response_max = float(np.max(flat))
+    best_point = corner
+    best_score = -1e9
+
+    for flat_index in candidate_indices:
+        local_y, local_x = divmod(int(flat_index), local.shape[1])
+        point = np.array([float(x0 + local_x), float(y0 + local_y)], dtype=np.float64)
+        shift = float(np.linalg.norm(point - corner))
+        if shift > radius:
+            continue
+        response_score = float(corner_response[int(point[1]), int(point[0])] / max(response_max, 1e-6))
+        inside_score = (
+            _ray_score(score_map, point, prev_dir, ray_len, 1.0)
+            + _ray_score(score_map, point, next_dir, ray_len, 1.0)
+        ) * 0.5
+        outside_score = (
+            _ray_score(score_map, point, -prev_dir, outside_len, 2.0)
+            + _ray_score(score_map, point, -next_dir, outside_len, 2.0)
+        ) * 0.5
+        line_error = (_line_distance(point, prev_line) + _line_distance(point, next_line)) / max(radius * 2.0, 1.0)
+        proximity = shift / max(radius, 1.0)
+        score = response_score * 1.7 + inside_score * 1.2 - outside_score * 0.35 - line_error * 0.55 - proximity * 0.18
+        if score > best_score:
+            best_score = score
+            best_point = point
+
+    return best_point.astype(np.float64)
+
+
 def _refine_corners_from_side_lines(score_map: PointArray, corners: PointArray) -> PointArray:
     lines = [_fit_side_line(score_map, corners[index], corners[(index + 1) % 4]) for index in range(4)]
     refined = corners.copy()
@@ -512,7 +601,20 @@ def _refine_corners_from_side_lines(score_map: PointArray, corners: PointArray) 
         if shift_len > max_shift:
             intersection = corners[index] + shift * (max_shift / max(shift_len, 1e-6))
         refined[index] = intersection
-    return _order_corners(refined)
+    normalized = cv2.normalize(score_map.astype(np.float32), None, 0.0, 1.0, cv2.NORM_MINMAX)
+    corner_response = cv2.cornerMinEigenVal(normalized, 5, 3)
+    snapped = refined.copy()
+    for index in range(4):
+        snapped[index] = _snap_corner_to_local_response(
+            score_map,
+            corner_response,
+            refined[index],
+            refined[(index - 1) % 4],
+            refined[(index + 1) % 4],
+            lines[(index - 1) % 4],
+            lines[index],
+        )
+    return _order_corners(snapped)
 
 
 def _candidate_to_path(candidate: QuadCandidate, score_map: PointArray, scale: float) -> dict:

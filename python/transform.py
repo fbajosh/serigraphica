@@ -1292,12 +1292,6 @@ def export_dewarped(
 
     _emit_progress(progress, 6, "Reading rectangles")
     outer_path, inner_paths = _derive_rectangles(rectangles)
-    if not inner_paths:
-        corners = [_path_corner(outer_path, i) for i in range(4)]
-        _emit_progress(progress, 35, "Perspective fallback")
-        result = export_corrected(image_path, [[x, y] for x, y in corners], output_path, quality)
-        _emit_progress(progress, 100, "Complete")
-        return result
 
     _emit_progress(progress, 10, "Building mesh")
     layout = _build_nested_mesh_layout(

@@ -760,7 +760,7 @@ export function App() {
     }
     setBusy(true)
     setDewarpProgress(null)
-    setStatus(rectangles.length >= 2 ? 'Exporting dewarped image...' : 'Exporting perspective image...')
+    setStatus('Exporting dewarped image...')
     try {
       const exportFillShapes = filledImage || fillDirty ? fillShapes : []
       const out = await window.serigraphica.exportDewarped(
@@ -790,7 +790,7 @@ export function App() {
     }
     setBusy(true)
     setDewarpProgress(null)
-    setStatus(rectangles.length >= 2 ? 'Exporting dewarped image...' : 'Exporting perspective image...')
+    setStatus('Exporting dewarped image...')
     try {
       const exportFillShapes = filledImage || fillDirty ? fillShapes : []
       const out = await window.serigraphica.exportDewarpedAs(
