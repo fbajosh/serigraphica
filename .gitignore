@@ -4,6 +4,7 @@ dist/
 out/
 .vite/
 .DS_Store
+**/.DS_Store
 *.log
 
 # Local planning notes
