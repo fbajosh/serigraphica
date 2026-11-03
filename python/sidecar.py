@@ -12,9 +12,13 @@ from __future__ import annotations
 import json
 import sys
 import traceback
+from pathlib import Path
 from collections.abc import Callable
 
 import cv2
+
+# The desktop sidecar and browser package use the same canonical Python sources.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'packages' / 'editor' / 'engine'))
 
 from detect_guides import detect_guides
 from transform import export_corrected, export_dewarped, export_filled

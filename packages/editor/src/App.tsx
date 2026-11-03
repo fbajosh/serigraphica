@@ -1,6 +1,7 @@
+import type { EditorProps } from './platform'
 import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react'
 import { buildFillSampleRegions, Canvas, CanvasHandle } from './components/Canvas'
-import type { BezierNode, DetectGuidesResult, DewarpProgress, FillShape, Point, Quad, RectPath, Tool } from '../shared/types'
+import type { BezierNode, DetectGuidesResult, DewarpProgress, FillShape, Point, Quad, RectPath, Tool } from './types'
 
 type Loaded = {
   path: string
@@ -8,70 +9,15 @@ type Loaded = {
   height: number
   dataUrl: string
   method?: string
+  guideKey?: string
 }
 
-const DEBUG_OUTLINES_KEY = 'serigraphica.manualOutlines.v3'
 const RECTANGLE_COLORS = ['#ff5e5e', '#4ea1ff', '#4de8ff', '#5ee05e', '#ffd84d', '#ff5cff'] as const
 const FIXED_MESH_DIVISIONS = 24
 const FIXED_MESH_CURVE = 100
 
-type SavedManualOutline = {
-  version: 3
-  filename: string
-  imagePath: string
-  savedAt: string
-  imageWidth: number
-  imageHeight: number
-  rectangles: RectPath[]
-  centerLargestInnerHorizontal?: boolean
-  centerLargestInnerVertical?: boolean
-}
-
-type SavedManualOutlineMeta = {
-  savedAt: string
-  imageWidth: number
-  imageHeight: number
-  rectangleNodes: number[]
-  centerLargestInnerHorizontal?: boolean
-  centerLargestInnerVertical?: boolean
-}
-
 function imageFilename(path: string): string {
   return path.split(/[\\/]/).pop() || path
-}
-
-function readDebugOutlineStore(): Record<string, SavedManualOutline> {
-  try {
-    const raw = window.localStorage.getItem(DEBUG_OUTLINES_KEY)
-    return raw ? JSON.parse(raw) : {}
-  } catch {
-    return {}
-  }
-}
-
-function writeDebugOutlineStore(store: Record<string, SavedManualOutline>) {
-  window.localStorage.setItem(DEBUG_OUTLINES_KEY, JSON.stringify(store))
-}
-
-function getSavedDebugOutline(imagePath: string): SavedManualOutline | null {
-  return readDebugOutlineStore()[imagePath] ?? null
-}
-
-function getSavedDebugOutlineMeta(imagePath: string): SavedManualOutlineMeta | null {
-  const saved = getSavedDebugOutline(imagePath)
-  if (!saved) return null
-  return {
-    savedAt: saved.savedAt,
-    imageWidth: saved.imageWidth,
-    imageHeight: saved.imageHeight,
-    rectangleNodes: saved.rectangles.map((path) => path.nodes.length),
-    centerLargestInnerHorizontal: saved.centerLargestInnerHorizontal,
-    centerLargestInnerVertical: saved.centerLargestInnerVertical
-  }
-}
-
-function isBoolean(value: unknown): value is boolean {
-  return typeof value === 'boolean'
 }
 
 function pathFromCorners(corners: Point[]): RectPath {
@@ -374,7 +320,7 @@ function fillDraftStatus(pointCount: number): string {
   return `Fill: ${pointCount} points. Release Shift to close or click another point.`
 }
 
-export function App() {
+export function SerigraphicaEditor({ api, guides, titlebarStart, renderPrivacyNotice, formats = ['jpg'], mode = 'desktop', allowExportAs = false, emptyHint }: EditorProps) {
   const [image, setImage] = useState<Loaded | null>(null)
   const [tool, setTool] = useState<Tool>('pen-rectangle')
   const [rectangles, setRectangles] = useState<RectPath[]>([])
@@ -391,20 +337,16 @@ export function App() {
   const [showMesh, setShowMesh] = useState(false)
   const [centerLargestInnerHorizontal, setCenterLargestInnerHorizontal] = useState(true)
   const [centerLargestInnerVertical, setCenterLargestInnerVertical] = useState(true)
+  const [canvasRotation, setCanvasRotation] = useState(0)
+  const [rightPanelHidden, setRightPanelHidden] = useState(false)
   const [zoomLevel, setZoomLevel] = useState(1)
   const [dewarpPreview, setDewarpPreview] = useState<Loaded | null>(null)
   const [dewarpProgress, setDewarpProgress] = useState<DewarpProgress | null>(null)
   const [dragActive, setDragActive] = useState(false)
-  const [debugMessage, setDebugMessage] = useState('')
-  const [savedDebugOutline, setSavedDebugOutline] = useState<SavedManualOutlineMeta | null>(null)
   const canvasRef = useRef<CanvasHandle>(null)
   const dewarpCancelRequestedRef = useRef(false)
   const dewarpPreviewInFlightRef = useRef(false)
   const filename = image ? imageFilename(image.path) : ''
-
-  const refreshSavedDebugOutline = useCallback((imagePath: string) => {
-    setSavedDebugOutline(getSavedDebugOutlineMeta(imagePath))
-  }, [])
 
   const applyDetectedGuides = useCallback((result: DetectGuidesResult, baseRectangles: RectPath[]) => {
     const detected = Array.isArray(result.rectangles) ? result.rectangles : []
@@ -429,12 +371,9 @@ export function App() {
   }, [])
 
   const applyLoadedImage = useCallback(async (res: Loaded) => {
-    const targetFilename = imageFilename(res.path)
-    const saved = getSavedDebugOutline(res.path)
-    const savedRectangles = saved?.rectangles ?? []
     setImage(res)
-    setRectangles(savedRectangles)
-    setActiveRectangleIndex(savedRectangles.length ? 0 : null)
+    setRectangles([])
+    setActiveRectangleIndex(null)
     setDraft([])
     setFillShapes([])
     setFillDraft([])
@@ -442,40 +381,40 @@ export function App() {
     setFilledImage(null)
     setFillDirty(false)
     setTool('pen-rectangle')
-    setShowMesh(savedRectangles.length > 0)
+    setShowMesh(false)
+    setHideGuides(false)
     setZoomLevel(1)
+    setCanvasRotation(0)
     setDewarpPreview(null)
-    setCenterLargestInnerHorizontal(saved && isBoolean(saved.centerLargestInnerHorizontal) ? saved.centerLargestInnerHorizontal : true)
-    setCenterLargestInnerVertical(saved && isBoolean(saved.centerLargestInnerVertical) ? saved.centerLargestInnerVertical : true)
-    const sizeWarning = saved && (saved.imageWidth !== res.width || saved.imageHeight !== res.height)
-      ? ' Dimensions differ from the open image.'
-      : ''
-    setDebugMessage(saved ? `Loaded saved paths for ${targetFilename}.${sizeWarning}` : '')
-    refreshSavedDebugOutline(res.path)
+    setDewarpProgress(null)
+    setCenterLargestInnerHorizontal(true)
+    setCenterLargestInnerVertical(true)
+    const saved = guides?.load(res)
     if (saved) {
-      setStatus(`Loaded saved paths for ${targetFilename}.${sizeWarning}`)
+      setRectangles(saved.rectangles)
+      setActiveRectangleIndex(deriveRectangles(saved.rectangles).outerIndex ?? 0)
+      setCenterLargestInnerHorizontal(saved.centerHorizontal)
+      setCenterLargestInnerVertical(saved.centerVertical)
+      setShowMesh(true)
+      setStatus('Restored saved lines for this photo from this browser.')
       return
     }
-    setStatus('Detecting starter guides...')
+    setStatus('Loading local image engine and detecting starter guides…')
     try {
-      const result = await window.serigraphica.detectGuides(res.path, [])
-      if (applyDetectedGuides(result, [])) {
-        setDebugMessage(`Auto-detected starter guides for ${targetFilename}`)
-      } else {
-        setDebugMessage('')
-        setStatus('No guide edges detected. Draw: click four corners around the next rectangle')
+      const result = await api.detectGuides(res.path, [])
+      if (!applyDetectedGuides(result, [])) {
+        setStatus('No guide edges detected. Draw four corners around the artwork.')
       }
     } catch (err) {
-      setDebugMessage('')
       setStatus(`Detection failed: ${(err as Error).message}. Draw manually.`)
     }
-  }, [applyDetectedGuides, refreshSavedDebugOutline])
+  }, [applyDetectedGuides, api, guides])
 
   const handleOpen = useCallback(async () => {
     setBusy(true)
     setStatus('Opening image...')
     try {
-      const res = await window.serigraphica.openImage()
+      const res = await api.openImage()
       if (!res) {
         setStatus('Ready')
         return
@@ -486,16 +425,21 @@ export function App() {
     } finally {
       setBusy(false)
     }
-  }, [applyLoadedImage])
+  }, [applyLoadedImage, api])
 
   const handleCanvasDrop = useCallback(async (e: DragEvent<HTMLDivElement>) => {
     e.preventDefault()
     setDragActive(false)
+    if (busy) return
+    if (e.dataTransfer.files.length !== 1) {
+      setStatus('Choose one photo at a time (up to 20 MB).')
+      return
+    }
     const file = e.dataTransfer.files[0]
     if (!file) return
-    let imagePath = ''
+    let imagePath: string
     try {
-      imagePath = window.serigraphica.filePathForDrop(file)
+      imagePath = api.filePathForDrop(file)
     } catch (err) {
       setStatus(`Error: ${(err as Error).message}`)
       return
@@ -507,14 +451,14 @@ export function App() {
     setBusy(true)
     setStatus('Opening dropped image...')
     try {
-      const res = await window.serigraphica.openImagePath(imagePath)
+      const res = await api.openImagePath(imagePath)
       await applyLoadedImage(res)
     } catch (err) {
       setStatus(`Error: ${(err as Error).message}`)
     } finally {
       setBusy(false)
     }
-  }, [applyLoadedImage])
+  }, [applyLoadedImage, busy, api])
 
   const setRectangleAt = useCallback((rectangleIndex: number, updater: (path: RectPath) => RectPath) => {
     setRectangles((prev) => prev.map((path, index) => (index === rectangleIndex ? updater(path) : path)))
@@ -533,6 +477,12 @@ export function App() {
     setFillDraft([])
     setTool('pan')
     setStatus('Pan - drag empty canvas to move the view')
+  }, [image])
+
+  const handleRotateCanvas = useCallback(() => {
+    if (!image) return
+    setCanvasRotation((rotation) => (rotation + 1) % 4)
+    setStatus('Canvas rotated clockwise')
   }, [image])
 
   const clearDewarpOutputs = useCallback(() => {
@@ -571,18 +521,16 @@ export function App() {
     setBusy(true)
     setStatus(rectangles.length ? 'Redetecting starter guides...' : 'Detecting starter guides...')
     try {
-      const result = await window.serigraphica.detectGuides(image.path, rectangles)
+      const result = await api.detectGuides(image.path, rectangles)
       if (!applyDetectedGuides(result, rectangles)) {
         setStatus('No guide edges detected. Draw manually.')
-      } else {
-        setDebugMessage(`Auto-detected starter guides for ${imageFilename(image.path)}`)
       }
     } catch (err) {
       setStatus(`Detection failed: ${(err as Error).message}`)
     } finally {
       setBusy(false)
     }
-  }, [applyDetectedGuides, image, rectangles])
+  }, [applyDetectedGuides, image, rectangles, api])
 
   const handleAppendCorner = useCallback((point: Point) => {
     const next = [...draft, point]
@@ -735,7 +683,7 @@ export function App() {
     setBusy(true)
     setStatus(filledImage ? 'Refilling image...' : 'Filling image...')
     try {
-      const filled = await window.serigraphica.previewFilled(
+      const filled = await api.previewFilled(
         dewarpPreview.path,
         fillShapes,
         98,
@@ -750,9 +698,9 @@ export function App() {
     } finally {
       setBusy(false)
     }
-  }, [centerLargestInnerHorizontal, centerLargestInnerVertical, dewarpPreview, fillDirty, fillShapes, filledImage, image, rectangles])
+  }, [centerLargestInnerHorizontal, centerLargestInnerVertical, dewarpPreview, fillDirty, fillShapes, filledImage, image, rectangles, api])
 
-  const handleExport = useCallback(async () => {
+  const handleExport = useCallback(async (format: 'jpg' | 'png', saveAs = false) => {
     if (!image) return
     if (rectangles.length === 0) {
       setStatus('Create at least one rectangle first')
@@ -763,7 +711,7 @@ export function App() {
     setStatus('Exporting dewarped image...')
     try {
       const exportFillShapes = filledImage || fillDirty ? fillShapes : []
-      const out = await window.serigraphica.exportDewarped(
+      const out = await (saveAs ? api.exportDewarpedAs : api.exportDewarped)(
         image.path,
         rectangles,
         92,
@@ -772,56 +720,24 @@ export function App() {
         centerLargestInnerHorizontal,
         centerLargestInnerVertical,
         exportFillShapes,
-        buildFillSampleRegions(rectangles, centerLargestInnerHorizontal, centerLargestInnerVertical)
+        buildFillSampleRegions(rectangles, centerLargestInnerHorizontal, centerLargestInnerVertical),
+        format
       )
-      setStatus(`Exported ${out.outputWidth}x${out.outputHeight} -> ${out.outputPath}`)
+      if (!out) { setStatus('Export cancelled'); return }
+      setStatus(mode === 'browser' ? `Downloaded ${out.outputPath} (${out.outputWidth}×${out.outputHeight}). Keep editing or open another photo.` : `Exported ${out.outputWidth}×${out.outputHeight} → ${out.outputPath}`)
     } catch (err) {
       setStatus(`Error: ${(err as Error).message}`)
     } finally {
       setBusy(false)
     }
-  }, [centerLargestInnerHorizontal, centerLargestInnerVertical, fillDirty, fillShapes, filledImage, image, rectangles])
-
-  const handleExportAs = useCallback(async () => {
-    if (!image) return
-    if (rectangles.length === 0) {
-      setStatus('Create at least one rectangle first')
-      return
-    }
-    setBusy(true)
-    setDewarpProgress(null)
-    setStatus('Exporting dewarped image...')
-    try {
-      const exportFillShapes = filledImage || fillDirty ? fillShapes : []
-      const out = await window.serigraphica.exportDewarpedAs(
-        image.path,
-        rectangles,
-        92,
-        image.path,
-        FIXED_MESH_CURVE,
-        centerLargestInnerHorizontal,
-        centerLargestInnerVertical,
-        exportFillShapes,
-        buildFillSampleRegions(rectangles, centerLargestInnerHorizontal, centerLargestInnerVertical)
-      )
-      if (!out) {
-        setStatus('Export cancelled')
-        return
-      }
-      setStatus(`Exported ${out.outputWidth}x${out.outputHeight} -> ${out.outputPath}`)
-    } catch (err) {
-      setStatus(`Error: ${(err as Error).message}`)
-    } finally {
-      setBusy(false)
-    }
-  }, [centerLargestInnerHorizontal, centerLargestInnerVertical, fillDirty, fillShapes, filledImage, image, rectangles])
+  }, [centerLargestInnerHorizontal, centerLargestInnerVertical, fillDirty, fillShapes, filledImage, image, rectangles, api, mode])
 
   const handleDewarp = useCallback(async () => {
     if (dewarpProgress) {
       dewarpCancelRequestedRef.current = true
       setStatus('Cancelling dewarp...')
       try {
-        await window.serigraphica.cancelDewarp()
+        await api.cancelDewarp()
       } catch (err) {
         setStatus(`Error: ${(err as Error).message}`)
       }
@@ -845,7 +761,7 @@ export function App() {
     setDewarpProgress({ percent: 0, stage: 'Starting', operation: 'preview' })
     setStatus('Generating dewarp preview...')
     try {
-      const preview = await window.serigraphica.previewDewarped(
+      const preview = await api.previewDewarped(
         image.path,
         rectangles,
         92,
@@ -865,7 +781,7 @@ export function App() {
       setDewarpProgress(null)
       setBusy(false)
     }
-  }, [centerLargestInnerHorizontal, centerLargestInnerVertical, dewarpPreview, dewarpProgress, filledImage, image, rectangles])
+  }, [centerLargestInnerHorizontal, centerLargestInnerVertical, dewarpPreview, dewarpProgress, filledImage, image, rectangles, api])
 
   const handleToggleHorizontalCenter = useCallback(() => {
     setCenterLargestInnerHorizontal((enabled) => !enabled)
@@ -897,49 +813,13 @@ export function App() {
     })
   }, [dewarpPreview, rectangles.length])
 
-  const handleSaveDebugOutlines = useCallback(() => {
-    if (!image) return
-    const targetFilename = imageFilename(image.path)
-    try {
-      const store = readDebugOutlineStore()
-      store[image.path] = {
-        version: 3,
-        filename: targetFilename,
-        imagePath: image.path,
-        savedAt: new Date().toISOString(),
-        imageWidth: image.width,
-        imageHeight: image.height,
-        rectangles,
-        centerLargestInnerHorizontal,
-        centerLargestInnerVertical
-      }
-      writeDebugOutlineStore(store)
-      refreshSavedDebugOutline(image.path)
-      setDebugMessage(`Saved lines and centering settings for ${targetFilename}`)
-      setStatus(`Saved lines and centering settings for ${targetFilename}`)
-    } catch (err) {
-      const message = `Save failed: ${(err as Error).message}`
-      setDebugMessage(message)
-      setStatus(message)
-    }
-  }, [centerLargestInnerHorizontal, centerLargestInnerVertical, image, rectangles, refreshSavedDebugOutline])
-
   useEffect(() => {
-    if (!image) {
-      setSavedDebugOutline(null)
-      setDebugMessage('')
-      return
-    }
-    refreshSavedDebugOutline(image.path)
-  }, [image, refreshSavedDebugOutline])
-
-  useEffect(() => {
-    return window.serigraphica.onDewarpProgress((progress) => {
+    return api.onDewarpProgress((progress) => {
       if (progress.operation !== 'preview') return
       if (!dewarpPreviewInFlightRef.current) return
       setDewarpProgress(progress)
     })
-  }, [])
+  }, [api])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1006,21 +886,48 @@ export function App() {
   const fillButtonAction = filledImage ? (fillDirty ? 'Refill' : 'Unfill') : 'Fill'
   const fillButtonLabel = `${fillButtonAction} ${fillShapes.length}`
   const fillActionEnabled = !busy && ((filledImage && !fillDirty) || (dewarpActive && fillShapes.length > 0))
-  const saveLinesLabel = savedDebugOutline ? 'Resave Lines' : 'Save Lines'
+  const handleSaveLines = () => {
+    if (!image || !guides) return
+    try {
+      guides.save(image, {
+        width: image.width, height: image.height, rectangles,
+        centerHorizontal: centerLargestInnerHorizontal, centerVertical: centerLargestInnerVertical,
+      })
+      setStatus('Lines saved locally. Reopen this photo to restore them.')
+    } catch { setStatus('Could not save lines. Browser storage may be full or unavailable.') }
+  }
+
+  const handleClearSavedLines = () => {
+    try { guides?.clear?.(); setStatus('Saved lines cleared. Current edits remain open.') }
+    catch { setStatus('Could not clear saved lines. Check this browser’s site storage settings.') }
+  }
+
   const dewarpButtonLabel = dewarpProgress
     ? `Dewarping...${Math.round(Math.max(0, Math.min(100, dewarpProgress.percent)))}%`
     : dewarpActive ? 'Back to Mesh' : 'Dewarp'
   const dewarpButtonClass = dewarpProgress ? 'dewarp-button dewarp-button--busy' : 'dewarp-button'
 
   return (
-    <div className="app">
+    <div className={`app${rightPanelHidden ? ' app--panel-hidden' : ''}`}>
       <div className="app-titlebar">
+        {titlebarStart}
         <div className="app-title">Serigraphica</div>
+        <div className="titlebar-actions">
+          {renderPrivacyNotice?.(handleClearSavedLines)}
+          <button
+            className="titlebar-icon-button"
+            onClick={() => setRightPanelHidden((hidden) => !hidden)}
+            title={rightPanelHidden ? 'Show right panel' : 'Hide right panel'}
+            aria-label={rightPanelHidden ? 'Show right panel' : 'Hide right panel'}
+          >
+            {rightPanelHidden ? <PanelClosedIcon /> : <PanelOpenIcon />}
+          </button>
+        </div>
       </div>
 
       <div
         className={`canvas-host${dragActive ? ' is-dragging' : ''}${!image ? ' is-empty' : ''}`}
-        onClick={!image ? handleOpen : undefined}
+        onClick={!image && !busy ? handleOpen : undefined}
         onDragEnter={(e) => {
           e.preventDefault()
           setDragActive(true)
@@ -1045,6 +952,7 @@ export function App() {
             src={displayImage.dataUrl}
             imageWidth={displayImage.width}
             imageHeight={displayImage.height}
+            rotation={canvasRotation}
             tool={activeFilledImage ? 'pan' : dewarpActive ? (tool === 'fill' ? 'fill' : 'pan') : tool === 'fill' ? 'pan' : tool}
             rectangles={dewarpActive ? [] : rectangles}
             draft={dewarpActive ? [] : draft}
@@ -1072,13 +980,18 @@ export function App() {
             onActivateFillShape={setActiveFillShapeIndex}
           />
         ) : (
-          <div className="empty-state">Open an image to begin</div>
+          <div className="empty-state">{emptyHint ?? 'Open or drop an image to begin'}</div>
         )}
       </div>
 
+      {!rightPanelHidden && (
       <div className="panel">
         <section className="panel-workflow-section">
-          <h3>File</h3>
+          <div className="file-heading-row">
+            <h3>File</h3>
+            <button className="titlebar-icon-button" type="button" onClick={handleRotateCanvas} disabled={!image}
+              title="Rotate canvas clockwise" aria-label="Rotate canvas clockwise"><RotateClockwiseIcon /></button>
+          </div>
           <div className="path-actions file-actions">
             <button onClick={handleOpen} disabled={busy}>Open</button>
             <input className="filename-input" type="text" value={filename || 'No image'} readOnly />
@@ -1126,7 +1039,7 @@ export function App() {
           </div>
           <div className="path-actions guide-line-actions">
             <button onClick={handleResetAll} disabled={!hasAnyPath}>Clear Lines</button>
-            <button onClick={handleSaveDebugOutlines} disabled={!image || rectangles.length === 0}>{saveLinesLabel}</button>
+            <button onClick={handleSaveLines} disabled={busy || !image || !guides || rectangles.length === 0}>Save Lines</button>
           </div>
           <div className="path-actions guide-display-actions">
             <ToolButton active={showMesh} onClick={handleProjectMesh} title="Project mesh using both rectangles">
@@ -1183,16 +1096,42 @@ export function App() {
           </div>
         </section>
         <section className="panel-workflow-section">
-          <h3>Export</h3>
+          <h3>{mode === 'browser' ? 'Download' : 'Export'}</h3>
           <div className="path-actions export-actions">
-            <button onClick={handleExport} disabled={busy || !image || !outerCorners}>Export</button>
-            <button onClick={handleExportAs} disabled={busy || !image || !outerCorners}>Export As</button>
+            {formats.map(format => <button key={format} onClick={() => handleExport(format)} disabled={busy || !image || !outerCorners}>
+              {mode === 'browser' ? 'Download' : 'Export'} {format.toUpperCase()}
+            </button>)}
+            {allowExportAs && <button onClick={() => handleExport('jpg', true)} disabled={busy || !image || !outerCorners}>Export As</button>}
           </div>
         </section>
       </div>
+      )}
 
       <div className="status-message">{status}</div>
     </div>
+  )
+}
+
+function RotateClockwiseIcon() {
+  return <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <path d="M13.2499 0.999939C12.8359 0.999939 12.4999 1.33594 12.4999 1.74994V3.02694C11.3829 1.75894 9.75993 0.999939 7.99993 0.999939C5.03293 0.999939 2.47993 3.21094 2.06093 6.14394C2.00193 6.55394 2.28793 6.93394 2.69793 6.99294C2.73393 6.99894 2.76993 7.00094 2.80493 7.00094C3.17193 7.00094 3.49293 6.73094 3.54693 6.35694C3.86093 4.15894 5.77593 2.50094 8.00093 2.50094C9.52993 2.50094 10.9199 3.26394 11.7439 4.50094H9.75093C9.33693 4.50094 9.00093 4.83694 9.00093 5.25094C9.00093 5.66494 9.33693 6.00094 9.75093 6.00094H13.2509C13.6649 6.00094 14.0009 5.66494 14.0009 5.25094V1.75094C14.0009 1.33694 13.6649 1.00094 13.2509 1.00094L13.2499 0.999939Z" fill="currentColor" />
+    <path d="M8.00001 15.0001C7.87201 15.0001 7.74401 14.9511 7.64601 14.8541L3.14601 10.3541C2.95101 10.1591 2.95101 9.84213 3.14601 9.64713L7.64601 5.14613C7.84101 4.95113 8.15801 4.95113 8.35301 5.14613L12.853 9.64613C13.048 9.84113 13.048 10.1581 12.853 10.3531L8.35301 14.8531C8.25501 14.9511 8.12701 14.9991 7.99901 14.9991L8.00001 15.0001ZM4.20701 10.0001L8.00001 13.7931L11.793 10.0001L8.00001 6.20713L4.20701 10.0001Z" fill="currentColor" />
+  </svg>
+}
+
+function PanelOpenIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor" aria-hidden="true">
+      <path d="M12.5 1C13.881 1 15 2.119 15 3.5V12.5C15 13.881 13.881 15 12.5 15H3.5C2.119 15 1 13.881 1 12.5V3.5C1 2.119 2.119 1 3.5 1H12.5ZM9 14V2H3.5C2.672 2 2 2.672 2 3.5V12.5C2 13.328 2.672 14 3.5 14H9Z" />
+    </svg>
+  )
+}
+
+function PanelClosedIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor" aria-hidden="true">
+      <path d="M12.5 1H3.5C2.122 1 1 2.122 1 3.5V12.5C1 13.879 2.122 15 3.5 15H12.5C13.878 15 15 13.879 15 12.5V3.5C15 2.122 13.878 1 12.5 1ZM2 12.5V3.5C2 2.673 2.673 2 3.5 2H9V14H3.5C2.673 14 2 13.327 2 12.5ZM14 12.5C14 13.327 13.327 14 12.5 14H10V2H12.5C13.327 2 14 2.673 14 3.5V12.5Z" />
+    </svg>
   )
 }
 
