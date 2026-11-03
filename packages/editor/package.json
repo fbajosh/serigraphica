@@ -1,0 +1,21 @@
+{
+  "name": "@serigraphica/editor",
+  "version": "0.1.0",
+  "description": "Shared Serigraphica React editor and Python image engine",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/index.ts",
+    "./types": "./src/types.ts",
+    "./styles.css": "./src/styles.css"
+  },
+  "files": [
+    "src",
+    "engine",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "react": ">=18 <20",
+    "react-dom": ">=18 <20"
+  }
+}

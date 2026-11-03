@@ -7,7 +7,7 @@ import {
   useRef,
   useState
 } from 'react'
-import type { BezierNode, FillSampleRegion, FillShape, Point, RectPath, Tool } from '../../shared/types'
+import type { BezierNode, FillSampleRegion, FillShape, Point, RectPath, Tool } from '../types'
 
 const NODE_RADIUS = 7 // screen px
 const NODE_HIT_RADIUS = 12 // screen px
@@ -33,6 +33,7 @@ type Props = {
   src: string
   imageWidth: number
   imageHeight: number
+  rotation: number
   tool: Tool
   rectangles: RectPath[]
   draft: Point[]
@@ -105,6 +106,42 @@ function clampPoint(p: Point, width: number, height: number): Point {
     Math.max(0, Math.min(width, p[0])),
     Math.max(0, Math.min(height, p[1]))
   ]
+}
+
+function normalizeRotation(rotation: number): 0 | 1 | 2 | 3 {
+  return (((Math.round(rotation) % 4) + 4) % 4) as 0 | 1 | 2 | 3
+}
+
+function rotatedImageSize(width: number, height: number, rotation: 0 | 1 | 2 | 3): { width: number; height: number } {
+  return rotation % 2 === 0
+    ? { width, height }
+    : { width: height, height: width }
+}
+
+function imageToRotatedPoint(point: Point, width: number, height: number, rotation: 0 | 1 | 2 | 3): Point {
+  switch (rotation) {
+    case 1:
+      return [height - point[1], point[0]]
+    case 2:
+      return [width - point[0], height - point[1]]
+    case 3:
+      return [point[1], width - point[0]]
+    default:
+      return point
+  }
+}
+
+function rotatedToImagePoint(point: Point, width: number, height: number, rotation: 0 | 1 | 2 | 3): Point {
+  switch (rotation) {
+    case 1:
+      return [point[1], height - point[0]]
+    case 2:
+      return [width - point[0], height - point[1]]
+    case 3:
+      return [width - point[1], point[0]]
+    default:
+      return point
+  }
 }
 
 function nodeOutHandle(node: BezierNode): Point {
@@ -258,7 +295,7 @@ function pointOnSide(path: RectPath, sideIndex: number, t: number): Point {
   return samples[samples.length - 1].point
 }
 
-function coonsPoint(path: RectPath, u: number, v: number): Point {
+function _coonsPoint(path: RectPath, u: number, v: number): Point {
   const tl = path.nodes[path.cornerIndices[0]].point
   const tr = path.nodes[path.cornerIndices[1]].point
   const br = path.nodes[path.cornerIndices[2]].point
@@ -276,7 +313,7 @@ function coonsPoint(path: RectPath, u: number, v: number): Point {
   return sub(edgeBlend, cornerBlend)
 }
 
-function pathCornerPoint(path: RectPath, index: number): Point {
+function _pathCornerPoint(path: RectPath, index: number): Point {
   return path.nodes[path.cornerIndices[index]].point
 }
 
@@ -673,7 +710,7 @@ function elasticCoonsFromPatch(patch: MeshPatch, u: number, v: number, curve: nu
   return add(base, add(mul(leftCorrection, 1 - u), mul(rightCorrection, u)))
 }
 
-function transformNestedMesh(layout: MeshLayout, point: Point, curve: number): Point {
+function _transformNestedMesh(layout: MeshLayout, point: Point, curve: number): Point {
   for (const patch of layout.patches) {
     if (!pointInConvexQuad(point, patch.target)) continue
     const uv = invertBilinear(patch.target, point)
@@ -880,6 +917,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     src,
     imageWidth,
     imageHeight,
+    rotation,
     tool,
     rectangles,
     draft,
@@ -920,6 +958,8 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
   const inverseColorRef = useRef<{ key: string; color: string } | null>(null)
   const [containerSize, setContainerSize] = useState({ w: 0, h: 0 })
   const [imageReady, setImageReady] = useState(false)
+  const normalizedRotation = normalizeRotation(rotation)
+  const displaySize = rotatedImageSize(imageWidth, imageHeight, normalizedRotation)
 
   const propsRef = useRef({ tool, rectangles, draft, fillShapes, fillDraft, activeFillShapeIndex, activeRectangleIndex, hideGuides, showMesh, meshDivisions, meshCurve, centerLargestInnerHorizontal, centerLargestInnerVertical, meshColor })
   propsRef.current = { tool, rectangles, draft, fillShapes, fillDraft, activeFillShapeIndex, activeRectangleIndex, hideGuides, showMesh, meshDivisions, meshCurve, centerLargestInnerHorizontal, centerLargestInnerVertical, meshColor }
@@ -959,40 +999,40 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
   const clampViewToVisibleImage = useCallback((view: View = viewRef.current) => {
     const { w, h } = containerSize
     if (w <= 0 || h <= 0) return
-    const scaledWidth = imageWidth * view.scale
-    const scaledHeight = imageHeight * view.scale
+    const scaledWidth = displaySize.width * view.scale
+    const scaledHeight = displaySize.height * view.scale
     view.tx = Math.max(1 - scaledWidth, Math.min(w - 1, view.tx))
     view.ty = Math.max(1 - scaledHeight, Math.min(h - 1, view.ty))
-  }, [containerSize, imageHeight, imageWidth])
+  }, [containerSize, displaySize.height, displaySize.width])
 
   const fitToView = useCallback(() => {
     const { w, h } = containerSize
     if (w === 0 || h === 0) return
     const padding = 24
-    const sx = (w - padding * 2) / imageWidth
-    const sy = (h - padding * 2) / imageHeight
+    const sx = (w - padding * 2) / displaySize.width
+    const sy = (h - padding * 2) / displaySize.height
     const scale = Math.min(sx, sy)
     viewRef.current = {
       scale,
-      tx: (w - imageWidth * scale) / 2,
-      ty: (h - imageHeight * scale) / 2
+      tx: (w - displaySize.width * scale) / 2,
+      ty: (h - displaySize.height * scale) / 2
     }
     clampViewToVisibleImage()
     onViewChange(scale)
     requestDraw()
-  }, [clampViewToVisibleImage, containerSize, imageWidth, imageHeight, onViewChange, requestDraw])
+  }, [clampViewToVisibleImage, containerSize, displaySize.height, displaySize.width, onViewChange, requestDraw])
 
   const zoomToActualSize = useCallback(() => {
     const { w, h } = containerSize
     viewRef.current = {
       scale: 1,
-      tx: (w - imageWidth) / 2,
-      ty: (h - imageHeight) / 2
+      tx: (w - displaySize.width) / 2,
+      ty: (h - displaySize.height) / 2
     }
     clampViewToVisibleImage()
     onViewChange(1)
     requestDraw()
-  }, [clampViewToVisibleImage, containerSize, imageWidth, imageHeight, onViewChange, requestDraw])
+  }, [clampViewToVisibleImage, containerSize, displaySize.height, displaySize.width, onViewChange, requestDraw])
 
   useEffect(() => {
     if (imageReady && containerSize.w > 0) fitToView()
@@ -1002,13 +1042,15 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
 
   const imageToScreen = useCallback((ix: number, iy: number): Point => {
     const { tx, ty, scale } = viewRef.current
-    return [ix * scale + tx, iy * scale + ty]
-  }, [])
+    const rotated = imageToRotatedPoint([ix, iy], imageWidth, imageHeight, normalizedRotation)
+    return [rotated[0] * scale + tx, rotated[1] * scale + ty]
+  }, [imageHeight, imageWidth, normalizedRotation])
 
   const screenToImage = useCallback((sx: number, sy: number): Point => {
     const { tx, ty, scale } = viewRef.current
-    return [(sx - tx) / scale, (sy - ty) / scale]
-  }, [])
+    const rotatedPoint: Point = [(sx - tx) / scale, (sy - ty) / scale]
+    return rotatedToImagePoint(rotatedPoint, imageWidth, imageHeight, normalizedRotation)
+  }, [imageHeight, imageWidth, normalizedRotation])
 
   const pathForIndex = useCallback((rectangleIndex: number): RectPath | null => {
     return propsRef.current.rectangles[rectangleIndex] ?? null
@@ -1313,11 +1355,24 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
     if (img) {
       ctx.imageSmoothingEnabled = true
       ctx.imageSmoothingQuality = 'high'
-      ctx.drawImage(img, tx, ty, imageWidth * scale, imageHeight * scale)
+      ctx.save()
+      ctx.translate(tx, ty)
+      ctx.scale(scale, scale)
+      if (normalizedRotation === 1) {
+        ctx.translate(imageHeight, 0)
+        ctx.rotate(Math.PI / 2)
+      } else if (normalizedRotation === 2) {
+        ctx.translate(imageWidth, imageHeight)
+        ctx.rotate(Math.PI)
+      } else if (normalizedRotation === 3) {
+        ctx.translate(0, imageWidth)
+        ctx.rotate(-Math.PI / 2)
+      }
+      ctx.drawImage(img, 0, 0, imageWidth, imageHeight)
+      ctx.restore()
     }
 
     const {
-      tool: curTool,
       rectangles: currentRectangles,
       draft: currentDraft,
       fillShapes: currentFillShapes,
@@ -1381,12 +1436,12 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       ctx.stroke()
       ctx.restore()
     }
-  }, [containerSize, drawDraft, drawFillOverlays, drawPath, drawProjectedMesh, imageHeight, imageToScreen, imageWidth])
+  }, [containerSize, drawDraft, drawFillOverlays, drawPath, drawProjectedMesh, imageHeight, imageToScreen, imageWidth, normalizedRotation, src])
   drawRef.current = draw
 
   useEffect(() => {
     requestDraw()
-  }, [containerSize, imageReady, rectangles, draft, fillShapes, fillDraft, activeFillShapeIndex, activeRectangleIndex, tool, hideGuides, showMesh, meshDivisions, meshCurve, centerLargestInnerHorizontal, centerLargestInnerVertical, meshColor, editDragKey, requestDraw])
+  }, [containerSize, imageReady, rectangles, draft, fillShapes, fillDraft, activeFillShapeIndex, activeRectangleIndex, tool, hideGuides, showMesh, meshDivisions, meshCurve, centerLargestInnerHorizontal, centerLargestInnerVertical, meshColor, editDragKey, normalizedRotation, requestDraw])
 
   const findSegmentHit = useCallback((rectangleIndex: number, screenPoint: Point): HoverSegment => {
     const path = pathForIndex(rectangleIndex)
@@ -1604,6 +1659,7 @@ export const Canvas = forwardRef<CanvasHandle, Props>(function Canvas(
       findDeleteHit,
       findFillPointHit,
       findSegmentHitAny,
+      imageToScreen,
       imageHeight,
       imageWidth,
       onActivateRectangle,

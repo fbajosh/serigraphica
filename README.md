@@ -4,7 +4,7 @@ Serigraphica is an Electron desktop app for correcting photographs of serigraphs
 
 The current implementation is intentionally local-first:
 
-- Renderer: React + canvas in `src/renderer`.
+- Renderer: shared React + canvas package in `packages/editor`; desktop host in `src/renderer`.
 - Shell: Electron in `electron`.
 - Image processing: Python sidecar using OpenCV/NumPy in `python`.
 - Outputs: generated previews and exports are written under `output/`.
@@ -48,7 +48,7 @@ The guide model is a set of detected or manually drawn rectangle paths:
 
 ## Starter Detection
 
-Starter guide detection is implemented in `python/detect_guides.py`.
+Starter guide detection is implemented in `packages/editor/engine/detect_guides.py`.
 
 The detector is deliberately a starting-point tool, not an authority over the user. Its job is to place usable editable guides:
 
@@ -85,7 +85,7 @@ The conceptual target is an elastic sheet model: the marked rectangles are hard 
 
 ## Dewarp Algorithm
 
-Dewarping is implemented in `python/transform.py`.
+Dewarping is implemented in `packages/editor/engine/transform.py`.
 
 The sidecar receives the guide rectangles and builds an output-to-source remap:
 
@@ -152,3 +152,11 @@ npm run dev
 - The visible mesh and dewarp remap should be kept in sync as the global constraint-line spline is refined.
 - Saved guide paths are stored in local storage by filename, not as sidecar project files.
 - Fill is best for edge-adjacent artifacts on paper texture; complex image content under a mask may need manual review.
+
+## Shared desktop and web source
+
+The canonical editor and processing engine live in `packages/editor/`. Both hosts
+use this code through platform adapters; see [the package guide](packages/editor/README.md).
+The website consumes pinned upstream updates through review PRs. Desktop changes
+never deploy themselves to the website. Run `npm run typecheck`, `npm test`,
+`npm run build`, and the shared Python tests before proposing an update.

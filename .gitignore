@@ -23,3 +23,5 @@ models/*
 # Output sidecar artifacts
 *.corrected.jpg
 *.serigraphica.json
+
+.venv-ci/

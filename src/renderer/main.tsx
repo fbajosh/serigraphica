@@ -1,10 +1,11 @@
 import React from 'react'
 import { createRoot } from 'react-dom/client'
-import { App } from './App'
-import './styles.css'
+import { SerigraphicaEditor } from '@serigraphica/editor'
+import { desktopGuides } from './desktopGuides'
+import '@serigraphica/editor/styles.css'
 
 createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <App />
+    <SerigraphicaEditor api={window.serigraphica} guides={desktopGuides} mode="desktop" allowExportAs />
   </React.StrictMode>
 )
